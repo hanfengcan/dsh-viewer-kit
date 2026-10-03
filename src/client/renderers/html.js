@@ -22,18 +22,75 @@ function withCharset(source) {
   return `<meta charset="utf-8">\n${source}`
 }
 
+/** Vertical padding a rendered document has around its content. */
+const FRAME_PADDING = 48
+
+/** Tallest and shortest frame worth showing, before the user's cap applies. */
+const MIN_FRAME = 96
+const MAX_FRAME_FLOOR = 1600
+
+/** Block-level tags: each one starts a new visual line. */
+const BLOCK_TAG = /<\/?(?:p|div|section|article|header|footer|main|aside|nav|ul|ol|li|dl|dt|dd|table|thead|tbody|tfoot|tr|td|th|blockquote|pre|figure|figcaption|form|fieldset|h[1-6]|address)\b[^>]*>/gi
+/** Hard line breaks and rules. */
+const BREAK_TAG = /<(?:br|hr)\s*\/?>/gi
+/** Headings render taller than a body line; index 0 is unused. */
+/** @type {number[]} */
+const HEADING_HEIGHT = [0, 52, 44, 38, 34, 32, 30]
+
 /**
- * Pick a frame height from the source instead of measuring the document,
- * which a sandboxed frame will not let us observe. Tall sources grow to the
- * cap; short ones get a usable minimum. The document scrolls internally.
+ * Estimate the RENDERED height of a document from its source.
+ *
+ * A sandboxed frame cannot be measured — `sandbox=""` puts its document in an
+ * opaque origin, so `contentDocument` is null and a `load` handler learns
+ * nothing. Measuring it properly would mean injecting a script into the frame
+ * and reading `scrollHeight`, which needs `allow-scripts` and would hand the
+ * model's own scripts the same permission. So this stays a computation.
+ *
+ * The previous version counted SOURCE lines, which is systematically too tall:
+ * `<style>`, `<head>`, comments and doctype are markup the reader never sees,
+ * and a one-line minified document renders short while a five-line one with a
+ * long paragraph renders tall. Counting what actually paints — block elements,
+ * hard breaks, and the text between them — tracks the real height closely
+ * enough that the gap a user notices is gone.
  *
  * @param {string} source
  * @param {number} cap
  * @returns {number}
  */
-function estimateHeight(source, cap) {
-  const lines = source.split('\n').length
-  return Math.max(160, Math.min(cap, 140 + lines * 20))
+export function estimateHeight(source, cap) {
+  /** @type {string[]} */
+  const headings = source.match(/<h[1-6]\b[^>]*>/gi) ?? []
+  const headingTotal = headings.reduce((sum, tag) => sum + (HEADING_HEIGHT[Number(tag[2])] ?? 32), 0)
+
+  const visible = source
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<head[\s\S]*?<\/head>/gi, '')
+    .replace(/<!doctype[^>]*>/gi, '')
+    .replace(/<title[\s\S]*?<\/title>/gi, '')
+    .replace(BREAK_TAG, '\n')
+    .replace(BLOCK_TAG, '\n')
+    .replace(/<[^>]+>/g, '')
+
+  // A body line is ~24px at the 16px the samples use; long paragraphs wrap, so
+  // the width of the text matters more than the number of source lines.
+  const text = visible.replace(/&nbsp;/g, ' ').trim()
+  const lines = text === '' ? [] : text.split('\n')
+  let body = 0
+  for (const line of lines) {
+    const content = line.trim()
+    if (content === '') continue
+    // ~72 characters per line at a 16px base in a ~600px column.
+    body += 24 * Math.max(1, Math.ceil(content.length / 72))
+  }
+
+  const total = body + headingTotal + FRAME_PADDING
+  // The user's cap is honoured even when it is below the floor: someone who
+  // sets `maxPreviewHeight: 40` is asking for a 40px frame, and quietly giving
+  // them 96px would make the setting a lie.
+  if (cap < MIN_FRAME) return cap
+  return Math.min(cap, Math.max(MIN_FRAME, total))
 }
 
 /**

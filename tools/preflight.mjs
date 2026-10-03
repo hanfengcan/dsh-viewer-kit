@@ -28,7 +28,7 @@ import { execFileSync, execSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, dirname, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { activateBundle } from '../tests/ctx-harness.mjs'
@@ -191,7 +191,44 @@ if (typeof clientRel === 'string' && existsSync(join(PKG_DIR, clientRel))) {
   }
 }
 
-// --- 5. nothing unintended shipped ------------------------------------------
+// --- 5. the on-demand chunk, if the entry asks for one ---------------------
+//
+// The chart engine is a sibling file the host serves on demand, and the request
+// is a plain string inside the entry bundle. Nothing at install time would notice
+// a mismatch — a wrong file name 404s when the first chart appears, and a chunk
+// registered under the wrong id throws "loaded without registering" there. So
+// the archive is checked for the pairing the build config promises.
+if (typeof clientRel === 'string' && existsSync(join(PKG_DIR, clientRel))) {
+  const entry = readFileSync(join(PKG_DIR, clientRel), 'utf8')
+  const requested = /\.\/(client\.[A-Za-z0-9][A-Za-z0-9._-]*\.js)/.exec(entry)?.[1]
+  if (requested === undefined) {
+    ok('the entry requests no on-demand chunk')
+  } else {
+    const chunkPath = join(PKG_DIR, dirname(clientRel), requested)
+    if (!existsSync(chunkPath)) {
+      problems.push(
+        `the entry requests "./${requested}" but the archive has no such file — every chart would 404`,
+      )
+    } else {
+      const chunk = readFileSync(chunkPath, 'utf8')
+      const expectedId = `${manifest.name}/${requested}`
+      if (!chunk.startsWith(`window.__ModuleLoader__.load({ id: ${JSON.stringify(expectedId)},`)) {
+        problems.push(
+          `client/${requested} must register itself as ${JSON.stringify(expectedId)}; ` +
+            'a different id makes every chart throw "loaded without registering"',
+        )
+      } else if (statSync(chunkPath).size < 500_000) {
+        problems.push(
+          `client/${requested} is only ${statSync(chunkPath).size} bytes — the chart engine looks absent`,
+        )
+      } else {
+        ok(`on-demand chunk -> client/${requested} (${statSync(chunkPath).size.toLocaleString()} bytes, id ${expectedId})`)
+      }
+    }
+  }
+}
+
+// --- 6. nothing unintended shipped ------------------------------------------
 const entries = readdirSync(PKG_DIR, { recursive: true })
 const unwanted = entries.filter((entry) => {
   const value = String(entry)

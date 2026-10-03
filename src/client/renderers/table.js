@@ -144,16 +144,80 @@ function stringify(value) {
 }
 
 /**
+ * Split one pipe-table line into cells, honouring GFM's `\|` escape.
+ *
+ * A naive `split('|')` turns `| x\|y | 2 |` into three cells, so the row no
+ * longer matches the header's arity and the whole table is rejected. GitHub
+ * renders `\|` as a literal pipe, and so does this.
+ *
+ * @param {string} line
+ * @returns {string[]}
+ */
+function splitRow(line) {
+  let body = line.startsWith('|') ? line.slice(1) : line
+  // Only an UNESCAPED trailing pipe is the closing delimiter; `x\|` ends with a
+  // pipe that belongs to the cell.
+  if (body.endsWith('|') && !body.endsWith('\\|')) body = body.slice(0, -1)
+
+  const cells = []
+  let cell = ''
+  for (let index = 0; index < body.length; index += 1) {
+    const char = body[index]
+    if (char === '\\' && body[index + 1] === '|') {
+      cell += '|'
+      index += 1
+      continue
+    }
+    if (char === '|') {
+      cells.push(cell)
+      cell = ''
+      continue
+    }
+    cell += char
+  }
+  cells.push(cell)
+  return cells.map((value) => value.trim())
+}
+
+/**
+ * Read a GitHub pipe table, but ONLY if the fence is nothing but that table.
+ *
+ * The strictness is the whole point. A looser reader takes the first line as a
+ * header, the second as the separator, and treats *everything after it* as data
+ * — so a document that opens with a table and then continues ("## Notes", a
+ * second table, a paragraph) renders as invented rows, and the user cannot
+ * tell which cells they invented. Silent wrong data is worse than no preview,
+ * so anything that is not a table row ends the claim and the block stays the
+ * native code block the model wrote.
+ *
  * @param {string} text
  * @returns {{ header: string[], rows: string[][] } | null}
  */
 function fromPipeTable(text) {
   const lines = text.split('\n').map((line) => line.trim()).filter((line) => line !== '')
   if (lines.length < 2) return null
-  const split = (line) => line.replace(/^\||\|$/g, '').split('|').map((cell) => cell.trim())
-  const header = split(lines[0])
-  if (!/^:?-{2,}:?$/.test(split(lines[1])[0] ?? '')) return null
-  return { header, rows: lines.slice(2).map(split) }
+  // A table row is a line that both starts and ends with a pipe. Escaped pipes
+  // (`\|`) are cell content, not delimiters, and must not count here.
+  // The second pattern rejects a row of empty cells — a layout artefact, not
+  // data. It deliberately excludes `-`, or the `| --- | --- |` separator would
+  // match it and every real table would be rejected.
+  const isRow = (line) => /^\|.*\|$/.test(line) && !/^\|[\s|]*\|$/.test(line)
+  const header = splitRow(lines[0])
+  if (!isRow(lines[0]) || !isRow(lines[1])) return null
+  if (!/^:?-{2,}:?$/.test(splitRow(lines[1])[0] ?? '')) return null
+
+  const rows = []
+  for (const line of lines.slice(2)) {
+    // A second header+separator pair means this fence holds more than one
+    // table. Rendering only the first would silently drop the rest, so the
+    // whole block is left alone.
+    if (isRow(line) && /^:?-{2,}:?$/.test(splitRow(line)[0] ?? '')) return null
+    if (!isRow(line)) return null
+    rows.push(splitRow(line))
+  }
+  // Every row must have the header's arity, or the table was not a table.
+  if (rows.some((row) => row.length !== header.length)) return null
+  return { header, rows }
 }
 
 /**
@@ -183,7 +247,12 @@ export function createTableRenderer(t) {
     priority: 5,
 
     match(request) {
-      if (request.lang === 'json') return readTable('json', request.source) !== null
+      // `json` is tried first and unconditionally, even for a fence DSH did
+      // not label: an array of flat objects is a table whether the banner said
+      // "json", said nothing, or said "代码块". A JSON *object* — which is what
+      // an ECharts option is — is not a table, so this cannot collide with the
+      // chart renderer.
+      if (readTable('json', request.source) !== null) return true
       if (request.lang === 'csv' || request.lang === 'markdown' || request.lang === '') {
         return readTable(request.lang, request.source) !== null
       }

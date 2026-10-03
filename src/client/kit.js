@@ -20,6 +20,14 @@ export const DEFAULT_CONFIG = Object.freeze({
   maxPreviewHeight: 520,
   htmlAllowScripts: false,
   /**
+   * Height of an embedded chart, in CSS pixels.
+   *
+   * Charts need an explicit height: a canvas inside an auto-height box renders
+   * at zero, and ECharts does not recover from that on its own. Kept separate
+   * from `maxPreviewHeight` because this is a chosen size, not a ceiling.
+   */
+  chartHeight: 360,
+  /**
    * Open a claimed block in the rendered view rather than its source.
    *
    * Preview is the default because the whole point of the kit is to show what

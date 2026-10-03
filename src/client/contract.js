@@ -103,6 +103,9 @@
  * @property {number} [maxSourceBytes] Sources above this size keep the native
  *   code block instead of being handed to a renderer.
  * @property {number} [maxPreviewHeight] Pixel cap for an embedded preview.
+ * @property {number} [chartHeight] Height of an embedded chart, in CSS pixels.
+ *   Charts need a definite height; a canvas in an auto-height box renders at
+ *   zero.
  * @property {boolean} [htmlAllowScripts] Let previewed HTML run scripts inside
  *   an opaque-origin sandbox. **Off by default**; see docs/01-architecture.md §8.
  * @property {boolean} [defaultToPreview] Open a freshly seen item in its

@@ -1,4 +1,50 @@
 # dsh bundle patch: inserts this plugin into a profile's layer stack.
+#
+# `name` must be the exact package name — the loader resolves it as a package
+# import from the profile's node_modules, so a relative path would not find the
+# installed code.
+#
+# ── Configuration ────────────────────────────────────────────────────────────
+#
+# Everything below is optional. Uncomment a key to change this plugin's shipped
+# default for every profile that lists it; to change it for ONE profile only,
+# put the same block in that profile's own cordis.patch.yml instead (user
+# patches apply after bundle patches and win by row id):
+#
+#   # $DSH_HOME/profiles/<name>/cordis.patch.yml
+#   - id: dsh-viewer-kit
+#     config:
+#       htmlAllowScripts: true
+#
+# The hook is `apply(ctx, config)`: this plugin exports no `Config` schema, so
+# cordis forwards this block verbatim (see `resolveConfig` in @deepseek-ai/cordis)
+# and the client half validates it defensively — unknown keys are dropped and a
+# wrong-typed value falls back to its default rather than failing the entry,
+# because a failed entry is a failed web boot.
+#
+#   config:
+#     # Let previewed HTML run scripts, for charts and interactive reports.
+#     #
+#     # The frame is ALWAYS an opaque origin: `allow-scripts` is granted on its
+#     # own and never paired with `allow-same-origin`, so the document still
+#     # cannot reach the host DOM, cookies, or storage. What changes is that
+#     # merely rendering a block can start that block's network requests.
+#     htmlAllowScripts: false
+#
+#     # Open a claimed block in its rendered view instead of its source.
+#     defaultToPreview: true
+#
+#     # Tallest an embedded preview may grow, in CSS pixels.
+#     maxPreviewHeight: 520
+#
+#     # Sources above this many bytes keep the native code block.
+#     maxSourceBytes: 262144
+#
+#     # Turn individual renderers off without uninstalling, by id.
+#     disabledRendererIds: []
+#
+#     # Master switch.
+#     enabled: true
 - insert:
     - id: dsh-viewer-kit
       name: 'dsh-viewer-kit'

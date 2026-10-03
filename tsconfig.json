@@ -14,6 +14,6 @@
     "isolatedModules": true,
     "types": []
   },
-  "include": ["src/**/*.js", "tsdown.config.ts"],
+  "include": ["src/**/*.js", "src/**/*.d.ts", "tsdown.config.ts"],
   "exclude": ["node_modules", "client", "lib", "tests"]
 }

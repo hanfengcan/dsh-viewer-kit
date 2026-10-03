@@ -561,6 +561,36 @@ await test('table sniffing recognises csv, json arrays and pipe tables only', ()
   eq(readTable('csv', 'a,b'), null, 'a header with no rows is not worth a switch')
 })
 
+await test('a markdown fence is claimed ONLY when it is nothing but one table', () => {
+  // Found by asking what happens to a *complex* markdown document, and the
+  // answer was bad: a loose reader took the first line as a header and turned
+  // every following line into an invented data row. The user saw `## Notes`
+  // and a whole second table inside the preview with no way to tell which
+  // cells were fabricated. Silent wrong data is worse than no preview.
+  eq(readTable('markdown', '| name | age |\n| --- | --- |\n| ada | 36 |') !== null, true, 'a bare table is claimed')
+
+  eq(readTable('markdown', '## Report\n\nProse.\n\n| a | b |\n| --- | --- |\n| 1 | 2 |'), null,
+    'prose before the table -> left alone')
+  eq(readTable('markdown', '| name | age |\n| --- | --- |\n| ada | 36 |\n\n## Notes\n\nMore prose.'), null,
+    'prose after the table -> left alone, not invented as rows')
+  eq(readTable('markdown', '| a | b |\n| --- | --- |\n| 1 | 2 |\n| only-one-cell |'), null,
+    'a row of the wrong arity -> left alone rather than padded or truncated')
+  // A second table would be silently dropped if only the first were rendered.
+  eq(readTable('markdown', '| a | b |\n| --- | --- |\n| 1 | 2 |\n\n| c | d |\n| --- | --- |\n| 3 | 4 |'), null,
+    'two tables in one fence -> left alone')
+})
+
+await test('the strict pipe reader still accepts the shapes people actually write', () => {
+  const table = (text) => readTable('markdown', text)
+  eq(table('| a | b |\n| :--- | ---: |\n| 1 | 2 |'), { header: ['a', 'b'], rows: [['1', '2']] }, 'alignment markers')
+  eq(table('| a | b |\n| --- | --- |\n| 1 | 2 |\n'), { header: ['a', 'b'], rows: [['1', '2']] }, 'trailing newline')
+  eq(table('| a | b |\n| --- | --- |'), { header: ['a', 'b'], rows: [] }, 'a header with no rows is still a table')
+  eq(table('| a | b |\n| --- | --- |\n| x\\|y | 2 |'), { header: ['a', 'b'], rows: [['x|y', '2']] },
+    'an escaped pipe is cell content, unescaped the way GFM renders it')
+  // A row whose cells are all empty is a layout artefact, not data.
+  eq(table('| a | b |\n| --- | --- |\n| 1 | 2 |\n| | |'), null, 'an empty row means this is not a plain table')
+})
+
 await test('a csv fence gains a table/code switch', () => {
   const table = createTableRenderer((_key, fallback) => fallback)
   const { env } = mount(conversationFixture([
@@ -822,6 +852,352 @@ await test('the built bundle is syntactically loadable as a classic script', () 
   assert(bundle.includes('exports.apply'), 'exports apply')
   assert(!/\nimport\s/.test(bundle), 'no ESM import statements leaked into the output')
   assert(!/\nexport\s/.test(bundle), 'no ESM export statements leaked into the output')
+})
+
+// ---------------------------------------------------------------------------
+// third renderer (chart) — the one that needs a build contract, not just a file
+//
+// Adding a renderer is "one file + one line" only while the renderer is
+// self-contained. The chart engine is 1.5 MB, so it ships as a sibling file the
+// DSH client module system fetches on demand, and that adds requirements the
+// bundler can only satisfy if the build is configured for them. A regression
+// there is invisible until a chart fails to draw in the browser, so these
+// tests read the EMITTED files.
+// ---------------------------------------------------------------------------
+
+const { createEChartsRenderer, parseOption } = await import('../src/client/renderers/echarts.js')
+const { __setChunkTransport, ECHARTS_CHUNK } = await import('../src/client/chunk-loader.js')
+
+process.stdout.write('\nthird renderer (chart) — a renderer that needs the chunk contract\n')
+
+/** A stand-in for the real engine: no canvas, so it only records what it was asked to do. */
+function fakeEngine(log) {
+  return {
+    createChart(element, option) {
+      log.options.push(option)
+      const canvas = element.ownerDocument.createElement('div')
+      canvas.className = 'fake-canvas'
+      element.replaceChildren(canvas)
+      return {
+        setOption: (next) => log.options.push(next),
+        resize: () => log.resizes.push(true),
+        dispose: () => log.disposes.push(true),
+      }
+    },
+  }
+}
+
+const OPTION_SAMPLE = JSON.stringify({
+  xAxis: { type: 'category', data: ['Mon', 'Tue', 'Wed'] },
+  series: [{ type: 'bar', data: [12, 32, 24] }],
+})
+
+await test('option parsing is strict and explains itself', () => {
+  eq(parseOption(OPTION_SAMPLE).option !== undefined, true, 'valid option accepted')
+  assert(/no "series" array/.test(parseOption('{"xAxis":{}}').error), 'missing series is named')
+  assert(/not valid JSON/.test(parseOption('{oops}').error), 'bad JSON is named')
+  assert(/expected a JSON object/.test(parseOption('[1,2]').error), 'an array is rejected')
+  assert(/expected a JSON object/.test(parseOption('"a"').error), 'a bare string is rejected')
+  assert(/empty/.test(parseOption('   ').error), 'empty is rejected')
+  assert(/limit/.test(parseOption(`{"series":[],"pad":"${'x'.repeat(600_000)}"}`).error), 'oversized is rejected')
+  // Strictness is the point: a relaxed parse would hand ECharts a different
+  // value than the model wrote, and the chart would be wrong invisibly.
+  assert(parseOption("{a:1}").error !== undefined, 'unquoted keys are not accepted')
+})
+
+await test('the tooltip is forced to rich text so a formatter cannot inject markup', () => {
+  const hostile = JSON.stringify({ tooltip: { trigger: 'axis', formatter: '<img src=x>' }, series: [{ type: 'bar', data: [1] }] })
+  const { env } = mount(
+    conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'echarts', code: hostile }) }]),
+    { renderers: [createEChartsRenderer((_k, f) => f)] },
+  )
+  assert(switcher(env.document) !== null, 'claimed')
+  eq(env.document.querySelectorAll('img').length, 0, 'nothing was interpreted as markup')
+})
+
+await test('an echarts fence gains a chart/code switch and draws through the engine', async () => {
+  const log = { options: [], resizes: [], disposes: [] }
+  __setChunkTransport(async () => fakeEngine(log))
+  const { env } = mount(
+    conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'echarts', code: OPTION_SAMPLE }) }]),
+    { renderers: [createEChartsRenderer((_k, f) => f)] },
+  )
+  const sw = switcher(env.document)
+  assert(sw !== null, 'a view switch was added')
+  eq(sw.children.map((b) => b.getAttribute('data-dvk-view')), ['chart', 'code'], 'chart then code')
+  await tick()
+  eq(env.document.querySelectorAll('.fake-canvas').length, 1, 'the engine drew into our root')
+  eq(log.options[0].series[0].type, 'bar', 'the model option reached the engine unchanged')
+})
+
+await test('the chart request names the chunk the build actually emits', () => {
+  // The binding that cannot be checked by a bundler: a string in source, a file
+  // name in the build config, and the host's on-demand route. All three must
+  // agree or the chart 404s at render time.
+  const chunkFile = ECHARTS_CHUNK.replace(/^\.\//, '')
+  assert(/^\.\//.test(ECHARTS_CHUNK), 'the loader wants a relative spec starting with ./')
+
+  let emitted
+  try {
+    emitted = readFileSync(join(ROOT, 'client', chunkFile), 'utf8')
+  } catch {
+    throw new Error(`client/${chunkFile} was not emitted — is it still an entry in tsdown.config.ts?`)
+  }
+
+  assert(
+    /^client\.[A-Za-z0-9][A-Za-z0-9._-]*\.js$/.test(chunkFile),
+    `the host only serves /^client\\.[A-Za-z0-9][A-Za-z0-9._-]*\\.js$/, got ${chunkFile}`,
+  )
+  const expectedId = `"dsh-viewer-kit/${chunkFile}"`
+  assert(
+    emitted.startsWith(`window.__ModuleLoader__.load({ id: ${expectedId},`),
+    `the chunk must register itself as ${expectedId}; a mismatch means importChunk throws ` +
+      '"loaded without registering" at chart time',
+  )
+})
+
+await test('the engine chunk carries no Node-only globals', () => {
+  // ECharts and zrender branch on `process.env.NODE_ENV` because they must also
+  // run under Node. A browser has no `process`, so evaluating the chunk threw
+  // `process is not defined` and every chart failed to load — while every
+  // fixture test passed, because they stub the engine and never evaluate it.
+  const chunk = readFileSync(join(ROOT, 'client', ECHARTS_CHUNK.replace(/^\.\//, '')), 'utf8')
+  // Comments are stripped first: prose that merely mentions `process` is not a
+  // live reference. This cannot hide a real one — a real one is in code.
+  const code = chunk.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  const live = code.match(/\bprocess\b/g)
+  assert(live === null, `the chunk still reads \`process\` (${live?.length ?? 0}×); the build lost its process.env.NODE_ENV define`)
+  assert(!/\brequire\s*\(\s*['"]node:/.test(code), 'the chunk must not require a node: built-in')
+})
+
+await test('the main bundle stays small and the engine is not inlined into it', () => {
+  const bundle = readFileSync(join(ROOT, 'client', 'client.js'), 'utf8')
+  const chunk = readFileSync(join(ROOT, 'client', ECHARTS_CHUNK.replace(/^\.\//, '')), 'utf8')
+  // The whole reason the engine is a separate file. If this ever inlines, the
+  // cost silently returns to every user on every page load.
+  assert(bundle.length < 200_000, `client.js is ${bundle.length} bytes; the engine is inlined`)
+  assert(chunk.length > 500_000, `client.echarts.js is only ${chunk.length} bytes; is echarts actually bundled?`)
+  assert(!bundle.includes('echarts.init'), 'the engine API must not appear in the entry')
+  assert(bundle.includes("require.async") || bundle.includes('__dvkRequire.async'), 'the entry reaches the chunk through require.async')
+  assert(!/Promise\.resolve\(\)\.then\(\(\) => require\("\.\/client\.echarts/.test(bundle),
+    'a bare dynamic import of the chunk would throw "missed the module table"')
+})
+
+await test('the built ids match the package name on both sides', () => {
+  // `tsdown.config.ts` carries the package name as a literal, because the
+  // project's tsconfig excludes Node types and a `readFileSync` there would not
+  // type-check. A rename that missed the literal would produce a bundle the
+  // loader indexes under a name that does not exist, and the entry would never
+  // be started — a silent, total failure. So it is checked here.
+  const manifest = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+  const bundle = readFileSync(join(ROOT, 'client', 'client.js'), 'utf8')
+  assert(
+    bundle.startsWith(`window.__ModuleLoader__.load({ id: ${JSON.stringify(manifest.name)},`),
+    `client.js registers under a different id than the package name "${manifest.name}"`,
+  )
+})
+
+await test('a failed engine load is shown as content, not thrown', async () => {
+  __setChunkTransport(async () => {
+    throw new Error('HTTP 404')
+  })
+  const { env } = mount(
+    conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'echarts', code: OPTION_SAMPLE }) }]),
+    { renderers: [createEChartsRenderer((_k, f) => f)] },
+  )
+  await tick()
+  const note = env.document.querySelector('.dvk-chart-note')
+  assert(note !== null, 'a note is shown')
+  assert(/404/.test(note.textContent), `the reason survives: ${note.textContent}`)
+  // The code view is still reachable, which is the point of not throwing.
+  assert(switcher(env.document) !== null, 'the switch is still there')
+})
+
+await test('invalid JSON is reported in the preview and never reaches the engine', async () => {
+  const log = { options: [], resizes: [], disposes: [] }
+  __setChunkTransport(async () => fakeEngine(log))
+  const { env } = mount(
+    conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'echarts', code: '{ broken' }) }]),
+    { renderers: [createEChartsRenderer((_k, f) => f)] },
+  )
+  await tick()
+  const note = env.document.querySelector('.dvk-chart-note')
+  assert(note !== null, 'a note is shown instead of a blank box')
+  assert(/not valid JSON/.test(note.textContent), note.textContent)
+  eq(log.options, [], 'the engine was never called')
+})
+
+await test('the chart renderer does not steal json from the table renderer', () => {
+  const { env } = mount(
+    conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'json', code: '[{"a":1},{"a":2}]' }) }]),
+    { renderers: [createTableRenderer((_k, f) => f), createEChartsRenderer((_k, f) => f)] },
+  )
+  eq(switcher(env.document).children[0].getAttribute('data-dvk-view'), 'table', 'json arrays stay tables')
+})
+
+await test('an echarts chart is disposed when the block goes away', async () => {
+  const log = { options: [], resizes: [], disposes: [] }
+  __setChunkTransport(async () => fakeEngine(log))
+  const { env, seam } = mount(
+    conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'echarts', code: OPTION_SAMPLE }) }]),
+    { renderers: [createEChartsRenderer((_k, f) => f)] },
+  )
+  await tick()
+  seam.dispose()
+  eq(log.disposes, [true], 'the ECharts instance was disposed, canvas and observers with it')
+})
+
+// ---------------------------------------------------------------------------
+// a fence language DSH has no highlighter for
+//
+// Captured from the product: an `echarts` fence came out with
+// `<span class="_language_…">代码块</span>` and a `<pre class="_plain_…">` body.
+// `CodeToolbar` renders `supportsHighlighting(lang) ? lang : <fallback>`, and
+// DSH's grammar table has no `echarts` — so the fence name is not in the DOM at
+// all, and the body never becomes a highlighted `<div>`.
+//
+// Both of this kit's earlier recognition paths depend on exactly those two
+// facts, so every previously-green fixture missed it.
+// ---------------------------------------------------------------------------
+
+process.stdout.write('\nunknown fence language (no highlighter, generic banner)\n')
+
+const OPTION_UNKNOWN_FENCE = JSON.stringify({
+  tooltip: {},
+  series: [{ type: 'pie', radius: ['42%', '68%'], data: [{ name: 'a', value: 46 }] }],
+})
+
+await test('a fence DSH cannot highlight is recognised from its content', async () => {
+  const log = { options: [], resizes: [], disposes: [] }
+  __setChunkTransport(async () => fakeEngine(log))
+  const { env, seam } = mount(
+    conversationFixture([
+      { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'echarts', code: OPTION_UNKNOWN_FENCE, highlighted: false }) },
+    ]),
+    { renderers: [createEChartsRenderer((_k, f) => f)] },
+  )
+  assert(switcher(env.document) !== null, 'a switch appeared despite the generic banner')
+  eq(switcher(env.document).children.map((b) => b.getAttribute('data-dvk-view')), ['chart', 'code'], 'chart then code')
+  eq(seam.size(), 1, 'the block was claimed')
+  await tick()
+  eq(env.document.querySelectorAll('.fake-canvas').length, 1, 'and the engine drew')
+})
+
+await test('the preview frame is sized from what paints, not from source lines', async () => {
+  // A sandboxed frame cannot be measured — `sandbox=""` means an opaque origin
+  // and a null contentDocument — so the height is computed. Counting source
+  // lines was systematically too tall: `<style>`, `<head>`, comments and the
+  // doctype are markup nobody sees, and the report was a frame with a band of
+  // empty space under a two-heading document.
+  const { estimateHeight: estimate } = await import('../src/client/renderers/html.js')
+  const cap = 520
+
+  const short = estimate('<!doctype html><html><head><style>body{margin:0}</style></head><body><h1>Hi</h1><p>One line.</p></body></html>', cap)
+  const tall = estimate(
+    '<!doctype html><html><head><style>' + 'a{color:red}'.repeat(400) + '</style></head><body>' +
+      '<h1>Title</h1><p>' + 'word '.repeat(200) + '</p><p>' + 'word '.repeat(200) + '</p></body></html>',
+    cap,
+  )
+  assert(short < 200, `a short document got ${short}px; the empty space is still there`)
+  assert(tall > short * 2, `a long document got only ${tall}px against ${short}px — the estimator is not tracking content`)
+  eq(estimate('<html><head><style>a{}</style></head><body></body></html>', cap), 96,
+    'a document with no visible content still gets a clickable strip, not a sliver')
+  eq(estimate('<h1>x</h1>', cap), 124, 'a heading is priced as a heading, not as a body line')
+  eq(estimate('<p>' + 'word '.repeat(5000) + '</p>', cap), cap, 'a very long document stops at the user cap')
+  eq(estimate('<p>hi</p>', 40), 40, 'a cap below the floor wins, so a user can force a small frame')
+  assert(
+    estimate('<h1>a</h1><h2>b</h2><h1>c</h1>', cap) > estimate('<p>a</p><p>b</p><p>c</p>', cap),
+    'headings are not priced as body lines',
+  )
+})
+
+await test('the engine chunk is read through its named export', async () => {
+  // The chunk is CJS with a named `engine` export, so `require.async` returns
+  // `{ engine: { createChart } }`. Reading `createChart` off the top level
+  // reported "unexpected chunk shape" against a chunk that had downloaded and
+  // evaluated perfectly.
+  const log = { options: [], resizes: [], disposes: [] }
+  __setChunkTransport(async () => ({ engine: fakeEngine(log) }))
+  const { env } = mount(
+    conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'echarts', code: OPTION_SAMPLE }) }]),
+    { renderers: [createEChartsRenderer((_k, f) => f)] },
+  )
+  await tick()
+  eq(env.document.querySelectorAll('.fake-canvas').length, 1, 'the engine behind the named export drew')
+})
+
+await test('a chunk that exports nothing usable says what it did export', async () => {
+  // A bare "unexpected chunk shape" sent the debugging in the wrong direction
+  // for a full round, so the message names the keys it actually found.
+  __setChunkTransport(async () => ({ nope: 1 }))
+  const { env } = mount(
+    conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'echarts', code: OPTION_SAMPLE }) }]),
+    { renderers: [createEChartsRenderer((_k, f) => f)] },
+  )
+  await tick()
+  const note = env.document.querySelector('.dvk-chart-note')
+  assert(note !== null, 'a note is shown')
+  assert(/nope/.test(note.textContent), `the message names what the chunk exported: ${note.textContent}`)
+})
+
+await test('a bare pipe table in an unlabelled fence is still a table', () => {
+  const { env, seam } = mount(
+    conversationFixture([
+      { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'whatever', code: '| a | b |\n| --- | --- |\n| 1 | 2 |', highlighted: false }) },
+    ]),
+    { renderers: [createTableRenderer((_k, f) => f), createEChartsRenderer((_k, f) => f)] },
+  )
+  eq(switcher(env.document).children[0].getAttribute('data-dvk-view'), 'table', 'claimed as a table, not a chart')
+  eq(seam.size(), 1, 'claimed')
+})
+
+await test('an unlabelled fence holding neither a chart nor a table is left alone', () => {
+  const { env, seam } = mount(
+    conversationFixture([
+      { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'whatever', code: 'def f():\n    pass', highlighted: false }) },
+    ]),
+    { renderers: [createTableRenderer((_k, f) => f), createEChartsRenderer((_k, f) => f)] },
+  )
+  eq(switcher(env.document), null, 'no switch: content sniffing declined')
+  eq(env.document.querySelector('[data-code-block-content]').getAttribute('data-dvk-mode'), null, 'native block untouched')
+  // Bounded retries must actually stop, not spin for the life of the page.
+  eq(seam.diagnose().unclaimed, ['(none)'], 'reported as unclaimed with no language')
+})
+
+await test('a half-streamed chart is not claimed, and is picked up once complete', async () => {
+  const log = { options: [], resizes: [], disposes: [] }
+  __setChunkTransport(async () => fakeEngine(log))
+  const { env, seam } = mount(
+    conversationFixture([
+      // Mid-stream: the JSON is not parseable yet.
+      { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'echarts', code: '{"series": [{"type":', streaming: true, highlighted: false }) },
+    ]),
+    { renderers: [createEChartsRenderer((_k, f) => f)] },
+  )
+  eq(seam.size(), 0, 'incomplete JSON is not a chart')
+  eq(switcher(env.document), null, 'no switch while it streams')
+
+  // The fence closes with the full option, the way DSH swaps the body.
+  const contentNode = env.document.querySelector('[data-code-block-content]')
+  const pre = env.document.createElement('pre')
+  pre.className = '_plain_x'
+  pre.textContent = OPTION_UNKNOWN_FENCE
+  contentNode.replaceChildren(pre)
+  await tick()
+
+  eq(seam.size(), 1, 'claimed once the content was complete — no timer guessing')
+  assert(switcher(env.document) !== null, 'switch appeared on the settling mutation')
+})
+
+await test('the generic label is reported as "no language", not as a language called 代码块', () => {
+  const { seam } = mount(
+    conversationFixture([
+      { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'echarts', code: 'not a chart', highlighted: false }) },
+    ]),
+    { renderers: [createEChartsRenderer((_k, f) => f)] },
+  )
+  const report = seam.diagnose()
+  eq(report.languages, ['(none)'], 'the banner is reported as carrying no language')
 })
 
 // ---------------------------------------------------------------------------

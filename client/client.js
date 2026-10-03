@@ -1,4 +1,5 @@
 window.__ModuleLoader__.load({ id: "dsh-viewer-kit", factory: (require) => {
+  var __dvkRequire = require;
   var module = { exports: {} };
   var exports = module.exports;
 Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
@@ -166,6 +167,9 @@ const SWITCH_ATTRIBUTE = "data-dvk-switch";
 * @property {number} [maxSourceBytes] Sources above this size keep the native
 *   code block instead of being handed to a renderer.
 * @property {number} [maxPreviewHeight] Pixel cap for an embedded preview.
+* @property {number} [chartHeight] Height of an embedded chart, in CSS pixels.
+*   Charts need a definite height; a canvas in an auto-height box renders at
+*   zero.
 * @property {boolean} [htmlAllowScripts] Let previewed HTML run scripts inside
 *   an opaque-origin sandbox. **Off by default**; see docs/01-architecture.md §8.
 * @property {boolean} [defaultToPreview] Open a freshly seen item in its
@@ -450,6 +454,33 @@ function createCodeBlockSurface(options) {
 * @module dom-seam
 */
 /**
+* Banner labels DSH falls back to when it has no highlighter for the fence.
+*
+* Verified from the shipped `CodeToolbar` in
+* `@deepseek-ai/dsh-client-ui-primitives`: the label is
+* `supportsHighlighting(lang) ? lang : <fallback>`, and the fallback is
+* localized copy. A real DOM capture of an `echarts` fence in this harness
+* showed `<span class="_language_…">代码块</span>` — the language name is simply
+* not in the document for a fence DSH does not know.
+*
+* Kept as a set rather than a rule so an unseen locale degrades to "label
+* treated as a real language", which is the old behaviour, rather than to
+* "every unknown-language block gets sniffed".
+*/
+const GENERIC_LABELS = /* @__PURE__ */ new Set([
+	"code",
+	"code block",
+	"codeblock",
+	"plain text",
+	"plaintext",
+	"text",
+	"untitled",
+	"代码块",
+	"代码",
+	"纯文本",
+	"文本"
+]);
+/**
 * Read the message scope used to key view state.
 *
 * @param {Element} element
@@ -482,9 +513,24 @@ function settleState(content) {
 		reason: "highlighted"
 	};
 	return {
-		settled: false,
-		reason: "streaming-or-plain"
+		settled: true,
+		reason: "plain"
 	};
+}
+/**
+* The language labels DSH shows when it has no highlighter for the fence.
+*
+* `CodeToolbar` renders `supportsHighlighting(lang) ? lang : <fallback>`, and
+* the fallback is localized copy — so the original language name is not in the
+* DOM at all for an unknown fence. Comparing against these tells the seam
+* "this banner is telling me nothing", which is different from "this block is
+* javascript".
+*
+* @param {string} label
+* @returns {boolean}
+*/
+function isGenericLabel(label) {
+	return GENERIC_LABELS.has(label.trim().toLowerCase());
 }
 /**
 * Extract the fence language. It exists only as text in the banner, because
@@ -580,21 +626,23 @@ function createDomSeam(options) {
 			schedule(element);
 			return;
 		}
-		const { settled } = settleState(content);
-		if (!settled) {
-			schedule(element);
-			return;
-		}
 		const source = readSource(content);
 		if (source.trim() === "") {
 			schedule(element);
 			return;
 		}
+		const label = readLang(element);
+		const generic = isGenericLabel(label);
+		if (!generic && settleState(content).reason !== "highlighted") {
+			schedule(element);
+			return;
+		}
+		const lang = generic ? "" : label;
 		try {
 			const surface = createCodeBlockSurface({
 				root: element,
 				source,
-				lang: readLang(element),
+				lang,
 				info: readInfo(element),
 				scope: scopeOf(element),
 				kit,
@@ -602,7 +650,10 @@ function createDomSeam(options) {
 				t,
 				onOutcome: (rendererId) => kit.noteSurface(rendererId)
 			});
-			if (surface === null) return;
+			if (surface === null) {
+				schedule(element);
+				return;
+			}
 			surfaces.set(element, surface);
 			const timer = quietTimers.get(element);
 			if (timer !== void 0) clearTimeout(timer);
@@ -709,8 +760,10 @@ function createDomSeam(options) {
 				const content = element.querySelector(CONTENT_SELECTOR);
 				if (content === null) continue;
 				report.withContent += 1;
-				if (settleState(content).settled) report.settled += 1;
-				const lang = normalizeLang(readLang(element));
+				const label = readLang(element);
+				const generic = isGenericLabel(label);
+				if (settleState(content).reason === "highlighted" || generic) report.settled += 1;
+				const lang = generic ? "" : normalizeLang(label);
 				languages.add(lang === "" ? "(none)" : lang);
 				if (!surfaces.has(element)) {
 					const request = kit.buildRequest({
@@ -733,6 +786,254 @@ function createDomSeam(options) {
 			quietTimers.clear();
 			retryCounts.clear();
 			for (const element of root.querySelectorAll(CODE_BLOCK_SELECTOR)) surfaces.get(element)?.dispose();
+		}
+	};
+}
+
+//#endregion
+//#region src/client/chunk-loader.js
+/**
+* Reaching a package-local client chunk.
+*
+* The factory's `require` is the only door to the module table, and it is not
+* in scope for modules this file imports — the build banner aliases it to
+* `__dvkRequire` (see `tsdown.config.ts`), which is what this module reads.
+*
+* ## Why not `import()`
+*
+* Under `format: 'cjs'` a dynamic `import()` compiles to a bare
+* `require("./client.echarts.js")`. That goes to the module table's *sync*
+* `require`, which only knows seed words, already-materialized modules and
+* registered package factories — a package-local chunk is none of those, so it
+* throws "missed the module table". `require.async` is the documented path and
+* is what the loader actually implements (`importChunk`).
+*
+* The spec is a plain string and deliberately NOT derived from the built file
+* name at author time: the emitted name must satisfy the host's
+* `/^client\.[A-Za-z0-9][A-Za-z0-9._-]*\.js$/` pattern, and the chunk's own id
+* is derived from that name. Keeping the name in one constant here, and in
+* `chunkFileNames` in the build config, is the whole binding. `tests/run.mjs`
+* asserts the two agree against the real emitted file, because a mismatch
+* fails at *chart render time* rather than at build time.
+*
+* @module chunk-loader
+*/
+/** Must equal the chunk's `chunkFileNames` entry in `tsdown.config.ts`. */
+const ECHARTS_CHUNK = "./client.echarts.js";
+/**
+* The transport, replaced wholesale by tests. Defaults to the real one, and
+* the test seam exists for the same reason `kit._reset()` does: a stub that
+* does not fail cannot prove anything, but neither can a real 1.5 MB canvas
+* engine in a Node test.
+*
+* @type {(spec: string) => Promise<any>}
+*/
+let transport = async (spec) => {
+	if (typeof __dvkRequire === "undefined" || typeof __dvkRequire.async !== "function") throw new Error(`dsh-viewer-kit: this build cannot load client chunks (require.async unavailable) for ${spec}`);
+	return await __dvkRequire.async(spec);
+};
+/**
+* Fetch one on-demand chunk. Memoised by the module table itself, so a second
+* chart re-uses the first fetch.
+*
+* @param {string} spec
+* @returns {Promise<any>}
+*/
+function loadChunk(spec) {
+	return transport(spec);
+}
+
+//#endregion
+//#region src/client/renderers/echarts.js
+/**
+* Chart renderer — an ECharts option object, nothing else.
+*
+* The whole point of this renderer is that the model writes **data**, not a
+* document:
+*
+*     ```echarts
+*     { "xAxis": { "type": "category", "data": ["Mon","Tue"] },
+*       "series": [{ "type": "bar", "data": [12, 32] }] }
+*     ```
+*
+* No HTML wrapper, no `<script src>`, no CDN. That is not a convenience: a
+* chart written as HTML would need `htmlAllowScripts`, which reopens the
+* question docs/01-architecture.md §8 answers. Rendered this way the engine is
+* bundled, trusted code running in the host page, and the model contributes a
+* JSON object that ECharts draws — it never executes anything.
+*
+* ## Where the 1.5 MB lives
+*
+* Not here. The engine is `chunks/echarts.js`, fetched on demand through the
+* DSH chunk route, so a user who never writes a chart never downloads it. See
+* `chunk-loader.js` for the four rules that contract imposes.
+*
+* ## Failure is content, not an exception
+*
+* A model will eventually write invalid JSON, or a valid object that is not an
+* ECharts option. Both are shown *as the preview* with the parser's own
+* message, because the alternative — a renderer that throws, or one that
+* silently declines and leaves the user staring at raw JSON with no switch —
+* is strictly worse. The code view is always one click away.
+*
+* @module renderers/echarts
+*/
+/** Fence languages this renderer claims. */
+const LANGUAGES = /* @__PURE__ */ new Set(["echarts", "chart"]);
+/** Ceiling on option size, so one pathological block cannot stall the tab. */
+const MAX_OPTION_CHARS = 524288;
+/** Fallback chart height when the config does not say. */
+const DEFAULT_CHART_HEIGHT = 360;
+/**
+* Parse the fence body as JSON.
+*
+* JSON.parse is strict on purpose: accepting a relaxed form here would mean
+* ECharts receives a different value than the model wrote, and the resulting
+* chart would be wrong in a way nobody could debug.
+*
+* @param {string} source
+* @returns {{ option: object } | { error: string }}
+*/
+function parseOption(source) {
+	const text = source.trim();
+	if (text === "") return { error: "the block is empty" };
+	if (text.length > MAX_OPTION_CHARS) return { error: `the option is ${Math.round(text.length / 1024)} KB; the limit is ${MAX_OPTION_CHARS / 1024} KB` };
+	let value;
+	try {
+		value = JSON.parse(text);
+	} catch (error) {
+		return { error: `not valid JSON — ${error instanceof Error ? error.message : String(error)}` };
+	}
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return { error: "expected a JSON object, got " + (Array.isArray(value) ? "an array" : typeof value) };
+	if (!Array.isArray(
+		/** @type {any} */
+		value.series
+	) || value.series.length === 0) return { error: "no \"series\" array — an ECharts option needs at least one series" };
+	return { option: value };
+}
+/**
+* Force a non-HTML tooltip and drop nothing else.
+*
+* ECharts' default tooltip renders `formatter` output as HTML, which would turn
+* a model-authored string into markup in the host page. `richText` draws the
+* same content onto the canvas as text. Only the tooltip is touched: the rest
+* of the option is the model's, and quietly pruning fields it did not
+* recognise would make the renderer lie about what it rendered.
+*
+* @param {object} option
+* @returns {object}
+*/
+function harden(option) {
+	/** @type {any} */
+	const copy = { ...option };
+	if (copy.tooltip === void 0) return copy;
+	if (copy.tooltip === true || copy.tooltip === false) {
+		copy.tooltip = copy.tooltip === true ? { renderMode: "richText" } : copy.tooltip;
+		return copy;
+	}
+	if (typeof copy.tooltip === "object" && copy.tooltip !== null) copy.tooltip = {
+		...copy.tooltip,
+		renderMode: "richText"
+	};
+	return copy;
+}
+/**
+* @param {(key: string, fallback: string) => string} t
+* @returns {import('../contract.js').Renderer}
+*/
+function createEChartsRenderer(t) {
+	return {
+		id: "echarts",
+		label: "Chart",
+		priority: 8,
+		match(request) {
+			if (LANGUAGES.has(request.lang)) return true;
+			return !("error" in parseOption(request.source));
+		},
+		create(host) {
+			const { request, document: doc, mount, config } = host;
+			const parsed = parseOption(request.source);
+			const height = config().chartHeight || DEFAULT_CHART_HEIGHT;
+			/** @type {null | { setOption: (o: object) => void, resize: () => void, dispose: () => void }} */
+			let chart = null;
+			/** @type {null | { disconnect: () => void }} */
+			let observer = null;
+			/** @type {null | HTMLElement} */
+			let root = null;
+			/** @param {string} message */
+			function showProblem(message) {
+				if (root === null) return;
+				root.replaceChildren();
+				const note = doc.createElement("p");
+				note.className = "dvk-chart-note";
+				note.textContent = message;
+				root.appendChild(note);
+			}
+			return {
+				views: [{
+					id: "chart",
+					label: t("view.chart", "Chart")
+				}],
+				async enter(viewId) {
+					if (viewId === "code") return;
+					if (root !== null) {
+						root.remove();
+						root = null;
+					}
+					root = doc.createElement("div");
+					root.className = "dvk-chart";
+					root.style.height = `${height}px`;
+					mount(root);
+					if ("error" in parsed) {
+						showProblem(t("chart.invalid", "Cannot draw this chart: {reason}").replace("{reason}", parsed.error));
+						return;
+					}
+					const pending = doc.createElement("p");
+					pending.className = "dvk-chart-note";
+					pending.textContent = t("chart.loading", "Loading the chart engine…");
+					root.appendChild(pending);
+					let mod;
+					try {
+						mod = await loadChunk(ECHARTS_CHUNK);
+					} catch (error) {
+						showProblem(t("chart.loadFailed", "The chart engine could not be loaded: {reason}").replace("{reason}", error instanceof Error ? error.message : String(error)));
+						return;
+					}
+					if (root === null) return;
+					const engine = mod?.engine ?? mod;
+					if (engine == null || typeof engine.createChart !== "function") {
+						showProblem(t("chart.loadFailed", "The chart engine could not be loaded: {reason}").replace("{reason}", `the chunk exported ${Object.keys(mod ?? {}).join(", ") || "nothing"}`));
+						return;
+					}
+					try {
+						root.replaceChildren();
+						chart = engine.createChart(root, harden(parsed.option));
+					} catch (error) {
+						chart = null;
+						showProblem(t("chart.renderFailed", "ECharts rejected this option: {reason}").replace("{reason}", error instanceof Error ? error.message : String(error)));
+						return;
+					}
+					const ResizeObserverCtor = globalThis.ResizeObserver;
+					if (typeof ResizeObserverCtor === "function") {
+						const active = new ResizeObserverCtor(() => {
+							try {
+								chart?.resize();
+							} catch {}
+						});
+						observer = active;
+						active.observe(root);
+					}
+				},
+				dispose() {
+					observer?.disconnect();
+					observer = null;
+					try {
+						chart?.dispose();
+					} catch {}
+					chart = null;
+					root = null;
+				}
+			};
 		}
 	};
 }
@@ -763,18 +1064,58 @@ function withCharset(source) {
 	if (/<meta[^>]+charset\s*=/i.test(source)) return source;
 	return `<meta charset="utf-8">\n${source}`;
 }
+/** Vertical padding a rendered document has around its content. */
+const FRAME_PADDING = 48;
+/** Tallest and shortest frame worth showing, before the user's cap applies. */
+const MIN_FRAME = 96;
+/** Block-level tags: each one starts a new visual line. */
+const BLOCK_TAG = /<\/?(?:p|div|section|article|header|footer|main|aside|nav|ul|ol|li|dl|dt|dd|table|thead|tbody|tfoot|tr|td|th|blockquote|pre|figure|figcaption|form|fieldset|h[1-6]|address)\b[^>]*>/gi;
+/** Hard line breaks and rules. */
+const BREAK_TAG = /<(?:br|hr)\s*\/?>/gi;
+/** Headings render taller than a body line; index 0 is unused. */
+/** @type {number[]} */
+const HEADING_HEIGHT = [
+	0,
+	52,
+	44,
+	38,
+	34,
+	32,
+	30
+];
 /**
-* Pick a frame height from the source instead of measuring the document,
-* which a sandboxed frame will not let us observe. Tall sources grow to the
-* cap; short ones get a usable minimum. The document scrolls internally.
+* Estimate the RENDERED height of a document from its source.
+*
+* A sandboxed frame cannot be measured — `sandbox=""` puts its document in an
+* opaque origin, so `contentDocument` is null and a `load` handler learns
+* nothing. Measuring it properly would mean injecting a script into the frame
+* and reading `scrollHeight`, which needs `allow-scripts` and would hand the
+* model's own scripts the same permission. So this stays a computation.
+*
+* The previous version counted SOURCE lines, which is systematically too tall:
+* `<style>`, `<head>`, comments and doctype are markup the reader never sees,
+* and a one-line minified document renders short while a five-line one with a
+* long paragraph renders tall. Counting what actually paints — block elements,
+* hard breaks, and the text between them — tracks the real height closely
+* enough that the gap a user notices is gone.
 *
 * @param {string} source
 * @param {number} cap
 * @returns {number}
 */
 function estimateHeight(source, cap) {
-	const lines = source.split("\n").length;
-	return Math.max(160, Math.min(cap, 140 + lines * 20));
+	const headingTotal = (source.match(/<h[1-6]\b[^>]*>/gi) ?? []).reduce((sum, tag) => sum + (HEADING_HEIGHT[Number(tag[2])] ?? 32), 0);
+	const text = source.replace(/<!--[\s\S]*?-->/g, "").replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<head[\s\S]*?<\/head>/gi, "").replace(/<!doctype[^>]*>/gi, "").replace(/<title[\s\S]*?<\/title>/gi, "").replace(BREAK_TAG, "\n").replace(BLOCK_TAG, "\n").replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").trim();
+	const lines = text === "" ? [] : text.split("\n");
+	let body = 0;
+	for (const line of lines) {
+		const content = line.trim();
+		if (content === "") continue;
+		body += 24 * Math.max(1, Math.ceil(content.length / 72));
+	}
+	const total = body + headingTotal + FRAME_PADDING;
+	if (cap < MIN_FRAME) return cap;
+	return Math.min(cap, Math.max(MIN_FRAME, total));
 }
 /**
 * @param {(key: string, fallback: string) => string} t
@@ -959,6 +1300,14 @@ const DEFAULT_CONFIG = Object.freeze({
 	maxSourceBytes: 262144,
 	maxPreviewHeight: 520,
 	htmlAllowScripts: false,
+	/**
+	* Height of an embedded chart, in CSS pixels.
+	*
+	* Charts need an explicit height: a canvas inside an auto-height box renders
+	* at zero, and ECharts does not recover from that on its own. Kept separate
+	* from `maxPreviewHeight` because this is a chosen size, not a ceiling.
+	*/
+	chartHeight: 360,
 	/**
 	* Open a claimed block in the rendered view rather than its source.
 	*
@@ -1352,18 +1701,68 @@ function stringify(value) {
 	}
 }
 /**
+* Split one pipe-table line into cells, honouring GFM's `\|` escape.
+*
+* A naive `split('|')` turns `| x\|y | 2 |` into three cells, so the row no
+* longer matches the header's arity and the whole table is rejected. GitHub
+* renders `\|` as a literal pipe, and so does this.
+*
+* @param {string} line
+* @returns {string[]}
+*/
+function splitRow(line) {
+	let body = line.startsWith("|") ? line.slice(1) : line;
+	if (body.endsWith("|") && !body.endsWith("\\|")) body = body.slice(0, -1);
+	const cells = [];
+	let cell = "";
+	for (let index = 0; index < body.length; index += 1) {
+		const char = body[index];
+		if (char === "\\" && body[index + 1] === "|") {
+			cell += "|";
+			index += 1;
+			continue;
+		}
+		if (char === "|") {
+			cells.push(cell);
+			cell = "";
+			continue;
+		}
+		cell += char;
+	}
+	cells.push(cell);
+	return cells.map((value) => value.trim());
+}
+/**
+* Read a GitHub pipe table, but ONLY if the fence is nothing but that table.
+*
+* The strictness is the whole point. A looser reader takes the first line as a
+* header, the second as the separator, and treats *everything after it* as data
+* — so a document that opens with a table and then continues ("## Notes", a
+* second table, a paragraph) renders as invented rows, and the user cannot
+* tell which cells they invented. Silent wrong data is worse than no preview,
+* so anything that is not a table row ends the claim and the block stays the
+* native code block the model wrote.
+*
 * @param {string} text
 * @returns {{ header: string[], rows: string[][] } | null}
 */
 function fromPipeTable(text) {
 	const lines = text.split("\n").map((line) => line.trim()).filter((line) => line !== "");
 	if (lines.length < 2) return null;
-	const split = (line) => line.replace(/^\||\|$/g, "").split("|").map((cell) => cell.trim());
-	const header = split(lines[0]);
-	if (!/^:?-{2,}:?$/.test(split(lines[1])[0] ?? "")) return null;
+	const isRow = (line) => /^\|.*\|$/.test(line) && !/^\|[\s|]*\|$/.test(line);
+	const header = splitRow(lines[0]);
+	if (!isRow(lines[0]) || !isRow(lines[1])) return null;
+	if (!/^:?-{2,}:?$/.test(splitRow(lines[1])[0] ?? "")) return null;
+	const rows = [];
+	for (const line of lines.slice(2)) {
+		if (isRow(line) && /^:?-{2,}:?$/.test(splitRow(line)[0] ?? "")) return null;
+		if (!isRow(line)) return null;
+		rows.push(splitRow(line));
+	}
+	if (rows.some((row) => row.length !== header.length)) return null;
 	return {
 		header,
-		rows: lines.slice(2).map(split)
+		rows
 	};
 }
 /**
@@ -1391,7 +1790,7 @@ function createTableRenderer(t) {
 		label: "Table",
 		priority: 5,
 		match(request) {
-			if (request.lang === "json") return readTable("json", request.source) !== null;
+			if (readTable("json", request.source) !== null) return true;
 			if (request.lang === "csv" || request.lang === "markdown" || request.lang === "") return readTable(request.lang, request.source) !== null;
 			return false;
 		},
@@ -1474,18 +1873,28 @@ const DICTIONARIES = {
 		"view.code": "Code",
 		"view.preview": "Preview",
 		"view.table": "Table",
+		"view.chart": "Chart",
 		"html.frameTitle": "HTML preview",
 		"table.summary": "{rows} rows × {columns} columns",
-		"table.truncated": "Showing the first {rows} rows and {columns} columns"
+		"table.truncated": "Showing the first {rows} rows and {columns} columns",
+		"chart.loading": "Loading the chart engine…",
+		"chart.invalid": "Cannot draw this chart: {reason}",
+		"chart.loadFailed": "The chart engine could not be loaded: {reason}",
+		"chart.renderFailed": "ECharts rejected this option: {reason}"
 	},
 	zh: {
 		"switch.label": "内容视图",
 		"view.code": "代码",
 		"view.preview": "预览",
 		"view.table": "表格",
+		"view.chart": "图表",
 		"html.frameTitle": "HTML 预览",
 		"table.summary": "{rows} 行 × {columns} 列",
-		"table.truncated": "仅显示前 {rows} 行、前 {columns} 列"
+		"table.truncated": "仅显示前 {rows} 行、前 {columns} 列",
+		"chart.loading": "正在加载图表引擎…",
+		"chart.invalid": "无法绘制这张图：{reason}",
+		"chart.loadFailed": "图表引擎加载失败：{reason}",
+		"chart.renderFailed": "ECharts 拒绝了这个配置：{reason}"
 	}
 };
 /**
@@ -1695,6 +2104,21 @@ const STYLES = `
 .dvk-table tbody tr:nth-child(even) {
   background: color-mix(in srgb, var(--dsw-alias-interactive-bg-hover, #8881) 40%, transparent);
 }
+
+/* Chart view. The height is set inline from the chartHeight config — a canvas
+   in an auto-height box renders at zero — so the rule here is deliberately only
+   the width and the box, never the height. */
+.dvk-chart {
+  width: 100%;
+  min-height: 120px;
+  contain: content;
+}
+.dvk-chart-note {
+  margin: 0;
+  padding: 12px 2px;
+  color: var(--dsw-alias-label-tertiary, #888);
+  font: 11px/18px var(--dsw-font-family, system-ui, sans-serif);
+}
 `;
 
 //#endregion
@@ -1727,7 +2151,7 @@ const STYLES = `
 * @module client
 */
 const NAMESPACE = "dsh-viewer-kit";
-const VERSION = "0.4.0";
+const VERSION = "0.7.0";
 /**
 * Handle to the live activation, so a second `apply` can retire the first.
 * See the guard inside `apply`.
@@ -1739,8 +2163,17 @@ const LIVE_HANDLE = "__DSH_VIEWER_KIT_DISPOSE__";
 * Adding a renderer is exactly this: a new factory in `renderers/`, and one
 * more line here. Nothing else in the package changes — that is the whole
 * point of the layering in docs/01-architecture.md §4.
+*
+* `echarts` is also the one renderer that is not self-contained: it needs the
+* engine in `chunks/`, which costs a build-config entry and a chunk request
+* rather than nothing. That is still one file plus one line, and it is the
+* honest cost of not making every user download a chart engine.
 */
-const RENDERER_FACTORIES = [createHtmlRenderer, createTableRenderer];
+const RENDERER_FACTORIES = [
+	createEChartsRenderer,
+	createHtmlRenderer,
+	createTableRenderer
+];
 /**
 * Hard dependencies. The kit needs none of the host services: it is pure DOM
 * plus the two `ctx` members above. `locale` is used opportunistically when
@@ -1803,7 +2236,7 @@ function apply(ctx, rowConfig) {
 	} });
 	kit.setConfig(rowConfig);
 	const settings = kit.config();
-	log.log(`[${NAMESPACE}] config: default view=${settings.defaultToPreview ? "preview" : "code"}, html scripts=${settings.htmlAllowScripts ? "on" : "off"}, max preview height=${settings.maxPreviewHeight}px` + (settings.disabledRendererIds.length > 0 ? `, disabled renderers=${settings.disabledRendererIds.join(",")}` : ""));
+	log.log(`[${NAMESPACE}] config: default view=${settings.defaultToPreview ? "preview" : "code"}, html scripts=${settings.htmlAllowScripts ? "on" : "off"}, max preview height=${settings.maxPreviewHeight}px, chart height=${settings.chartHeight}px` + (settings.disabledRendererIds.length > 0 ? `, disabled renderers=${settings.disabledRendererIds.join(",")}` : ""));
 	teardown.push(...RENDERER_FACTORIES.map((factory) => kit.register(factory(t))));
 	log.log(`[${NAMESPACE}] renderers: ${kit.renderers().map((renderer) => renderer.id).join(", ")}`);
 	teardown.push(installStyles(doc));

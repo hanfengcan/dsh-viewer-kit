@@ -13,6 +13,34 @@ import { createCodeBlockSurface } from './code-block-surface.js'
 import { normalizeLang } from './contract.js'
 
 /**
+ * Banner labels DSH falls back to when it has no highlighter for the fence.
+ *
+ * Verified from the shipped `CodeToolbar` in
+ * `@deepseek-ai/dsh-client-ui-primitives`: the label is
+ * `supportsHighlighting(lang) ? lang : <fallback>`, and the fallback is
+ * localized copy. A real DOM capture of an `echarts` fence in this harness
+ * showed `<span class="_language_…">代码块</span>` — the language name is simply
+ * not in the document for a fence DSH does not know.
+ *
+ * Kept as a set rather than a rule so an unseen locale degrades to "label
+ * treated as a real language", which is the old behaviour, rather than to
+ * "every unknown-language block gets sniffed".
+ */
+const GENERIC_LABELS = new Set([
+  'code',
+  'code block',
+  'codeblock',
+  'plain text',
+  'plaintext',
+  'text',
+  'untitled',
+  '代码块',
+  '代码',
+  '纯文本',
+  '文本',
+])
+
+/**
  * Read the message scope used to key view state.
  *
  * @param {Element} element
@@ -40,7 +68,27 @@ export function settleState(content) {
   const child = content.firstElementChild
   if (child === null) return { settled: false, reason: 'empty' }
   if (child.tagName === 'DIV') return { settled: true, reason: 'highlighted' }
-  return { settled: false, reason: 'streaming-or-plain' }
+  // A `<pre>` is ambiguous on its own: it is a live stream for a language DSH
+  // can highlight, and the *settled* state for one it cannot. The caller
+  // disambiguates with the banner label, so this reports the shape and lets
+  // that decision be made in one place.
+  return { settled: true, reason: 'plain' }
+}
+
+/**
+ * The language labels DSH shows when it has no highlighter for the fence.
+ *
+ * `CodeToolbar` renders `supportsHighlighting(lang) ? lang : <fallback>`, and
+ * the fallback is localized copy — so the original language name is not in the
+ * DOM at all for an unknown fence. Comparing against these tells the seam
+ * "this banner is telling me nothing", which is different from "this block is
+ * javascript".
+ *
+ * @param {string} label
+ * @returns {boolean}
+ */
+export function isGenericLabel(label) {
+  return GENERIC_LABELS.has(label.trim().toLowerCase())
 }
 
 /**
@@ -154,25 +202,40 @@ export function createDomSeam(options) {
       schedule(element)
       return
     }
-    const { settled } = settleState(content)
-    if (!settled) {
-      // The block is still streaming, or its language has no highlighter and
-      // so renders through the `plain` branch in both phases. Either way the
-      // observer will call us again on the settling mutation; the quiet timer
-      // is the backstop for the case where that mutation is missed.
-      schedule(element)
-      return
-    }
     const source = readSource(content)
     if (source.trim() === '') {
       schedule(element)
       return
     }
+
+    const label = readLang(element)
+    // A generic label means DSH has no highlighter for this fence and the real
+    // language name is not in the DOM. A plain body has the same cause.
+    //
+    // Neither is a reason to skip the block: `plain` is also what an unknown
+    // language looks like *after* streaming has finished, so waiting for a
+    // highlighted body would wait forever. Instead the request is built with
+    // an EMPTY language and the renderers decide from the source. A block that
+    // is genuinely still streaming cannot satisfy a content rule (its JSON or
+    // its table is incomplete), so it falls through to the bounded retry and
+    // is picked up by the mutation that completes it. That is the point of
+    // deciding on content: the decision is self-correcting, where a timer can
+    // only guess.
+    const generic = isGenericLabel(label)
+    if (!generic && settleState(content).reason !== 'highlighted') {
+      // A plain body under a REAL language name is a live stream: the fence has
+      // not closed yet. Claiming it now would mount a preview over text that is
+      // still changing, and the preview would have to be torn down and rebuilt
+      // on every token. Wait for the mutation that settles it.
+      schedule(element)
+      return
+    }
+    const lang = generic ? '' : label
     try {
       const surface = createCodeBlockSurface({
         root: element,
         source,
-        lang: readLang(element),
+        lang,
         info: readInfo(element),
         scope: scopeOf(element),
         kit,
@@ -180,7 +243,10 @@ export function createDomSeam(options) {
         t,
         onOutcome: (rendererId) => kit.noteSurface(rendererId),
       })
-      if (surface === null) return
+      if (surface === null) {
+        schedule(element)
+        return
+      }
       surfaces.set(element, surface)
       const timer = quietTimers.get(element)
       if (timer !== undefined) clearTimeout(/** @type {any} */ (timer))
@@ -300,8 +366,16 @@ export function createDomSeam(options) {
         const content = element.querySelector(CONTENT_SELECTOR)
         if (content === null) continue
         report.withContent += 1
-        if (settleState(content).settled) report.settled += 1
-        const lang = normalizeLang(readLang(/** @type {Element} */ (element)))
+        const label = readLang(/** @type {Element} */ (element))
+        // A generic label is DSH saying "no highlighter for this fence", not a
+        // language called "代码块". Reporting it as `(none)` is what makes the
+        // difference visible when a block is not being claimed.
+        const generic = isGenericLabel(label)
+        // `settled` counts blocks the seam was willing to look at. A plain body
+        // under a real language is a live stream and is NOT one of them, which
+        // is what separates "still arriving" from "we do not claim this".
+        if (settleState(content).reason === 'highlighted' || generic) report.settled += 1
+        const lang = generic ? '' : normalizeLang(label)
         languages.add(lang === '' ? '(none)' : lang)
         if (!surfaces.has(/** @type {Element} */ (element))) {
           const request = kit.buildRequest({ surface: 'code-block', scope: scopeOf(element), lang, source: readSource(content) })

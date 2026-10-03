@@ -131,6 +131,59 @@ __DSH_VIEWER_KIT__.diagnose()
 > 和 `dsh.profile.bundles`，同样的操作不会再把它冲掉。
 > 复盘见 [`docs/01-architecture.md` §13](docs/01-architecture.md#13-已被实证的部分)。
 
+## 配置
+
+插件的所有可调项都是**插件配置**，写在 Loader 行的 `config` 里。
+本插件**没有**导出 `Config` schema —— cordis 因此把 `config` 原样转发给
+`apply(ctx, config)`（见 `@deepseek-ai/cordis` 的 `resolveConfig`：
+`if (!runtime.Config) return config`），客户端半体再用 `resolveConfig` 逐字段校验：
+未知键丢弃、类型不符的值**退回默认值**而不是让 entry 失败 —— entry 失败就是 web boot 失败。
+
+要改默认行为（对**当前这个 profile** 生效），编辑 profile 自己的 patch：
+
+```yaml
+# $DSH_HOME/profiles/<name>/cordis.patch.yml
+- id: dsh-viewer-kit
+  config:
+    htmlAllowScripts: true
+```
+
+用户 patch 在所有组合包层**之后**应用，按行 id 胜出，所以这样写会覆盖包内的默认值。
+改完刷新页面即可，配置变更会触发热替换，不必重启。
+
+| 键 | 默认 | 作用 |
+|---|---|---|
+| `enabled` | `true` | 总开关 |
+| `defaultToPreview` | `true` | 认领到的代码块默认打开**预览**而不是源码 |
+| `htmlAllowScripts` | `false` | 允许预览里的 HTML 执行脚本（图表等） |
+| `maxPreviewHeight` | `520` | 内嵌预览的最大高度（CSS 像素） |
+| `maxSourceBytes` | `262144` | 超过这个字节数的源码保持原生代码块，不交给渲染器 |
+| `disabledRendererIds` | `[]` | 按 id 关闭个别渲染器，无需卸载 |
+
+### 关于 `htmlAllowScripts`
+
+默认关闭，所以带 `<script>` 的 HTML（ECharts 等图表）在预览里**是空白的** ——
+需要时按上面的方式打开即可。
+
+打开后 iframe 仍然是**不透明源**：`allow-scripts` 单独授予，**绝不**与
+`allow-same-origin` 同时出现（那才是真正的逃逸），所以文档依然读不到宿主的 DOM、
+cookie 或 storage。变化的是：**仅仅渲染一段内容，就可能发起该内容里的网络请求**
+（远程图片被自动加载、脚本可向任意地址发请求）。内容本身是模型写的，泄露面基本限于
+模型已写出的东西，但"看一眼就联网"确实是新引入的能力。测试里有一条专门守着
+`allow-same-origin` 永远不被授予。
+
+> DSH 确实有配置界面（`dsh-settings` + `dsh-config-editor`），但按其 README：
+> 表单只暴露标了 `.volatile()` 的字段，且**目前没有任何客户端实现按 schema 自动生成表单**。
+> 所以现阶段开关就是上面这段 patch 文本，不是界面里的一个勾。
+
+改完刷新后，控制台这行会打印**实际生效**的配置，可用来确认：
+
+```
+[dsh-viewer-kit] config: default view=preview, html scripts=on, max preview height=520px
+```
+
+---
+
 ## 分发给别人
 
 依据官方《[打包与安装插件](https://deepseek-harness.github.io/deepseek-harness/develop/basic/publish)》，

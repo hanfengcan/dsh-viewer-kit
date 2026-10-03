@@ -144,5 +144,20 @@ export const STYLES = `
 .dvk-table tbody tr:nth-child(even) {
   background: color-mix(in srgb, var(--dsw-alias-interactive-bg-hover, #8881) 40%, transparent);
 }
+
+/* Chart view. The height is set inline from the chartHeight config — a canvas
+   in an auto-height box renders at zero — so the rule here is deliberately only
+   the width and the box, never the height. */
+.dvk-chart {
+  width: 100%;
+  min-height: 120px;
+  contain: content;
+}
+.dvk-chart-note {
+  margin: 0;
+  padding: 12px 2px;
+  color: var(--dsw-alias-label-tertiary, #888);
+  font: 11px/18px var(--dsw-font-family, system-ui, sans-serif);
+}
 `
 

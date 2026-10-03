@@ -27,6 +27,7 @@
  */
 
 import { createDomSeam } from './dom-seam.js'
+import { createEChartsRenderer } from './renderers/echarts.js'
 import { createHtmlRenderer } from './renderers/html.js'
 import { createKit } from './kit.js'
 import { createTableRenderer } from './renderers/table.js'
@@ -34,7 +35,7 @@ import { createTranslator } from './locale.js'
 import { installStyles } from './styles.js'
 
 const NAMESPACE = 'dsh-viewer-kit'
-const VERSION = '0.4.0'
+const VERSION = '0.7.0'
 
 /**
  * Handle to the live activation, so a second `apply` can retire the first.
@@ -48,8 +49,13 @@ const LIVE_HANDLE = '__DSH_VIEWER_KIT_DISPOSE__'
  * Adding a renderer is exactly this: a new factory in `renderers/`, and one
  * more line here. Nothing else in the package changes — that is the whole
  * point of the layering in docs/01-architecture.md §4.
+ *
+ * `echarts` is also the one renderer that is not self-contained: it needs the
+ * engine in `chunks/`, which costs a build-config entry and a chunk request
+ * rather than nothing. That is still one file plus one line, and it is the
+ * honest cost of not making every user download a chart engine.
  */
-const RENDERER_FACTORIES = [createHtmlRenderer, createTableRenderer]
+const RENDERER_FACTORIES = [createEChartsRenderer, createHtmlRenderer, createTableRenderer]
 
 /**
  * Hard dependencies. The kit needs none of the host services: it is pure DOM
@@ -136,6 +142,7 @@ export function apply(ctx, rowConfig) {
     `[${NAMESPACE}] config: default view=${settings.defaultToPreview ? 'preview' : 'code'}` +
       `, html scripts=${settings.htmlAllowScripts ? 'on' : 'off'}` +
       `, max preview height=${settings.maxPreviewHeight}px` +
+      `, chart height=${settings.chartHeight}px` +
       (settings.disabledRendererIds.length > 0 ? `, disabled renderers=${settings.disabledRendererIds.join(',')}` : ''),
   )
 
