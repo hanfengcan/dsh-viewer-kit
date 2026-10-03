@@ -105,7 +105,7 @@ dsh plugin --profile desktop add file:E:\1.i-code\0.dsh-workplace\dsh-viewer-kit
 
 ```
 [dsh-viewer-kit] renderers: html, table
-[dsh-viewer-kit] v0.1.0 active — N code block(s) enhanced
+[dsh-viewer-kit] v0.3.1 active — N code block(s) enhanced
 ```
 
 浏览器控制台里可以直接查状态：
@@ -130,6 +130,59 @@ __DSH_VIEWER_KIT__.diagnose()
 > 走 `dsh plugin add` 之后它进了 profile `package.json` 的 `dependencies`
 > 和 `dsh.profile.bundles`，同样的操作不会再把它冲掉。
 > 复盘见 [`docs/01-architecture.md` §13](docs/01-architecture.md#13-已被实证的部分)。
+
+## 分发给别人
+
+依据官方《[打包与安装插件](https://deepseek-harness.github.io/deepseek-harness/develop/basic/publish)》，
+组合包的 manifest 只需声明 `dsh.bundle.patch`，指向包内一个按**包名**引用自身的 patch：
+
+```jsonc
+// package.json
+"dsh": {
+  "bundle": { "patch": "./cordis.patch.yml" },   // 这个包贡献哪一层
+  "client": { "platform": "web" }                // 这个包有客户端半体
+}
+```
+```yaml
+# cordis.patch.yml —— 行里写包名，Node 的模块解析才找得到已安装的代码
+- insert:
+    - id: dsh-viewer-kit
+      name: 'dsh-viewer-kit'
+```
+
+**两条不需要任何构建授权的路线**（推荐其一）：
+
+```powershell
+# A. 交付 tarball —— 用户直接装这个文件
+npm pack                                  # prepack 已配好，会自动构建
+dsh plugin --profile desktop add ./dsh-viewer-kit-0.3.1.tgz
+
+# B. 发布到 npm —— 同样在 publish 阶段构建好产物
+npm publish
+dsh plugin --profile desktop add dsh-viewer-kit
+```
+
+**不要走 `github:` 直装。** 官方文档明确警告：git 安装拉的是**源码不是产物**，
+pnpm ≥10 会拒绝运行它的 `prepare` 脚本，除非用户在 profile 的 `pnpm-workspace.yaml`
+里写 `allowBuilds` —— 那等于**允许该包的代码在安装时于本机执行、且不在任何沙箱内**。
+分发预构建产物就没有这道坎。
+
+### 发布前自检
+
+```powershell
+pnpm run preflight     # 打包 → 解包到临时目录 → 校验 → 清理
+pnpm run release       # check + preflight，完整发布门禁
+```
+
+`preflight` 校验的是**用户真正拿到的那份字节**，而不是工作树：manifest 的三个声明、
+`exports["./client"]` 是否真能解析（解析不到就是 `MissingClientBundleError`，
+而渲染进程的 boot 审计会把 entry 失败判成**启动失败**）、host 半体能否 import，
+并让解出来的客户端 bundle 在严格 `ctx` 下真实激活一次。
+`tools/preflight.mjs <已解包目录>` 可以对任意解包结果单独跑。
+
+> 写这个自检时我特意做了**负向测试**：把 `client/client.js` 改名、把 patch 行写成别的包名、
+> 删掉 `dsh.bundle` 声明 —— 三种破坏都被精确报出。一个不会失败的检查比没有检查更坏，
+> 这正是本项目崩过两次的根因（见架构文档 §13.6）。
 
 ---
 

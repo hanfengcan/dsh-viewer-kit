@@ -1,2 +1,5 @@
 node_modules/
 *.log
+
+# Distribution archives are built by `npm pack` / `pnpm run preflight`, never committed.
+*.tgz
