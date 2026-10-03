@@ -368,8 +368,52 @@ function matchComplex(element, complex) {
 // document
 // ---------------------------------------------------------------------------
 
-class ShimDocument {
-  constructor() {
+/**
+ * The minimal window a document exposes as `defaultView`.
+ *
+ * Only `postMessage` plumbing exists, because that is the one browser facility
+ * the plugin reaches for through the DOM rather than through a global: the HTML
+ * preview's measuring frame reports its height with `parent.postMessage`, and
+ * the renderer subscribes via `document.defaultView`. A shim that omitted it
+ * would make that whole path untestable outside a browser.
+ */
+class ShimWindow {
+  /** @param {ShimDocument} document */
+  constructor(document) {
+    this.document = document
+    /** @type {Map<string, Set<(event: object) => void>>} */
+    this.listeners = new Map()
+  }
+
+  /** @param {string} type @param {(event: object) => void} listener */
+  addEventListener(type, listener) {
+    if (!this.listeners.has(type)) this.listeners.set(type, new Set())
+    this.listeners.get(type)?.add(listener)
+  }
+
+  /** @param {string} type @param {(event: object) => void} listener */
+  removeEventListener(type, listener) {
+    this.listeners.get(type)?.delete(listener)
+  }
+
+  /**
+   * Deliver a message the way a frame's `parent.postMessage` would.
+   *
+   * @param {{ source?: unknown, origin?: string, data?: unknown }} event
+   */
+  postMessage(event) {
+    for (const listener of [...(this.listeners.get('message') ?? [])]) {
+      listener({ origin: 'null', ...event })
+    }
+  }
+
+  /** How many listeners are attached, so a test can prove cleanup. */
+  listenerCount(type = 'message') {
+    return this.listeners.get(type)?.size ?? 0
+  }
+}
+
+class ShimDocument {  constructor() {
     // Initialised before any child is attached: `appendChild` records, and the
     // constructor itself appends.
     /** @type {Array<{ target: ShimElement, observer: ShimMutationObserver }>} */
@@ -381,10 +425,19 @@ class ShimDocument {
     this.body = new ShimElement('body', this)
     this.documentElement.appendChild(this.head)
     this.documentElement.appendChild(this.body)
+    // A real document has one, and the HTML renderer takes its message listener
+    // from here rather than from `globalThis` so it does not depend on a browser
+    // global. Without it the measuring path cannot be exercised in Node at all.
+    this.defaultView = new ShimWindow(this)
   }
 
   createElement(tagName) {
-    return new ShimElement(tagName, this)
+    const element = new ShimElement(tagName, this)
+    // A real iframe has a browsing context, and the HTML renderer identifies the
+    // sender of a measurement by comparing `event.source` against it. Without
+    // one here, the postMessage path could not be driven in Node at all.
+    if (String(tagName).toLowerCase() === 'iframe') element.contentWindow = { frame: element }
+    return element
   }
 
   createTextNode(data) {
@@ -564,4 +617,4 @@ export function createEnvironment() {
   }
 }
 
-export { ShimDocument, ShimElement, ShimMutationObserver, ShimText }
+export { ShimDocument, ShimElement, ShimMutationObserver, ShimText, ShimWindow }

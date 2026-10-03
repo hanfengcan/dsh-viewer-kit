@@ -31,6 +31,29 @@ Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
 * </div>
 * ```
 *
+* ## The content node generates no box
+*
+* Verified in the shipped shell stylesheet
+* (`dsh-web-frontend/dist/assets/index-BPHePDI_.css`):
+*
+* ```css
+* ._content_7gxqk_74 { display: contents }
+* ```
+*
+* `display: contents` means the content node has **no box at all** — its
+* children are laid out as children of `.block`. Three consequences this plugin
+* depends on, each of which would break silently if that rule ever changed:
+*
+* 1. The block's height is exactly the height of its visible child. There is no
+*    independent container height, so an empty band below a preview is always
+*    the preview's own doing, never the block reserving space.
+* 2. A `>` child selector written against the content node still matches its
+*    children, which is how the view switch hides one view and shows the other.
+* 3. DSH's own code view sets no height either — `._block :where(pre)` carries
+*    only `padding` and `overflow-x: auto` — so a preview that fixed its own
+*    height would disagree with the view it swaps with. That is the argument for
+*    measuring instead: it reproduces the sibling's "content decides" semantics.
+*
 * @typedef {object} CodeBlockDom
 */
 /**
@@ -166,7 +189,14 @@ const SWITCH_ATTRIBUTE = "data-dvk-switch";
 *   off. Read-only because every consumer only ever asks `includes`.
 * @property {number} [maxSourceBytes] Sources above this size keep the native
 *   code block instead of being handed to a renderer.
-* @property {number} [maxPreviewHeight] Pixel cap for an embedded preview.
+* @property {number} [maxPreviewHeight] Pixel cap for an embedded preview, and
+*   the exact height under `previewHeightMode: 'fixed'`.
+* @property {'measure' | 'fit' | 'fixed'} [previewHeightMode] How an HTML
+*   preview decides its height. `measure` sizes the frame to the document's
+*   real, measured height (no empty band, and a scrollbar only when the content
+*   genuinely exceeds the cap); `fit` estimates that height without a measuring
+*   frame; `fixed` gives every document `maxPreviewHeight`. **`measure` by
+*   default**, falling back to `fit` if no measurement arrives.
 * @property {number} [chartHeight] Height of an embedded chart, in CSS pixels.
 *   Charts need a definite height; a canvas in an auto-height box renders at
 *   zero.
@@ -1168,6 +1198,104 @@ function estimateHeight(source, cap) {
 	return Math.min(cap, total);
 }
 /**
+* Encode a document for safe transport inside a `<script>` in another srcdoc.
+*
+* Base64 rather than a quoted JSON string: the model's HTML can contain
+* `<\/script>`, and the HTML parser ends the script element on that text even
+* when it sits inside a JavaScript string literal. Base64's alphabet
+* (`A-Za-z0-9+/=`) cannot terminate anything, so this needs no escaping rules
+* to be right — and "needs no escaping rules" is the only kind of injection
+* defence worth having here.
+*
+* @param {string} text
+* @returns {string}
+*/
+function toBase64(text) {
+	const bytes = new TextEncoder().encode(text);
+	let binary = "";
+	for (const byte of bytes) binary += String.fromCharCode(byte);
+	return btoa(binary);
+}
+/**
+* Height the frame keeps until a measurement arrives.
+*
+* Exported so `tests/run.mjs` can wait exactly this long and assert the
+* fallback rather than guessing at a duration.
+*/
+const MEASURE_TIMEOUT_MS = 600;
+/**
+* Build the two-frame document that measures its own content.
+*
+* ## Why two frames
+*
+* An `<iframe>` is a replaced element: its height never derives from the
+* document inside it, so `max-height` alone only ever limits the 150px default
+* and a "short content shows fully, long content scrolls" frame cannot be
+* expressed in CSS at all. The height has to be measured, and measuring needs
+* script access to the inner document.
+*
+* The two sandbox attributes are what make that safe, and they only work
+* together:
+*
+*   - the OUTER frame has `allow-scripts` and NOT `allow-same-origin`, so its
+*     origin is opaque — it runs our measuring code but can reach nothing of
+*     the host's;
+*   - the INNER frame has `allow-same-origin` and NOT `allow-scripts`, so it
+*     inherits the outer's opaque origin (making it readable by the measuring
+*     script) while the MODEL'S OWN SCRIPTS STAY BLOCKED BY THE SANDBOX — not
+*     by a policy that could be argued with.
+*
+* The net isolation is the same as the single `sandbox=""` frame it replaces:
+* no host DOM, no host storage, no credentialed requests. What it adds is a
+* number.
+*
+* @param {string} source
+* @param {string} frameId
+* @param {number} initialHeight
+* @returns {string}
+*/
+function buildMeasuringDocument(source, frameId, initialHeight) {
+	const payload = toBase64(source);
+	return `<!doctype html><meta charset="utf-8">
+<style>
+  html,body{margin:0;padding:0;overflow:hidden;background:transparent}
+  iframe{display:block;width:100%;border:0;height:0}
+</style>
+<iframe id="dvk-inner" sandbox="allow-same-origin"></iframe>
+<script>
+(function () {
+  var inner = document.getElementById('dvk-inner');
+  var last = -1;
+  function measure() {
+    var doc;
+    try { doc = inner.contentDocument } catch (e) { return }
+    if (!doc || !doc.documentElement) return;
+    // scrollHeight is the CONTENT's height and does not depend on the frame's
+    // own viewport, which is what lets the frame be sized from it without a
+    // feedback loop. The inner stays at height 0 until a number is known.
+    var h = Math.max(doc.documentElement.scrollHeight, doc.body ? doc.body.scrollHeight : 0);
+    if (!h || h === last) return;
+    last = h;
+    inner.style.height = h + 'px';
+    try { parent.postMessage({ __dvk: 'height', id: ${JSON.stringify(frameId)}, height: h }, '*') } catch (e) {}
+  }
+  inner.addEventListener('load', function () {
+    measure();
+    // Images and webfonts land after the load event and change the height; a
+    // couple of follow-ups catch them without polling forever.
+    setTimeout(measure, 60);
+    setTimeout(measure, 300);
+    try { new ResizeObserver(measure).observe(inner.contentDocument.documentElement) } catch (e) {}
+  });
+  var bytes = atob(${JSON.stringify(payload)});
+  var buf = new Uint8Array(bytes.length);
+  for (var i = 0; i < bytes.length; i++) buf[i] = bytes.charCodeAt(i);
+  inner.srcdoc = new TextDecoder().decode(buf);
+  document.documentElement.style.height = ${JSON.stringify(String(initialHeight))} + 'px';
+})();
+<\/script>`;
+}
+/**
 * @param {(key: string, fallback: string) => string} t
 * @returns {import('../contract.js').Renderer}
 */
@@ -1182,22 +1310,55 @@ function createHtmlRenderer(t) {
 		create(host) {
 			const { request, limits, document: doc, mount } = host;
 			const config = host.config();
+			const view = doc.defaultView ?? globalThis;
 			/** @type {HTMLIFrameElement | null} */
 			let frame = null;
+			/** Identifies this frame's measurement messages; only ever compared. */
+			const frameId = `dvk-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
+			/**
+			* The frame's current height, so a late measurement can be ignored once
+			* the surface is gone and so the fallback can be told from a real result.
+			*/
+			let measured = false;
+			/** @param {MessageEvent} event */
+			const onMessage = (event) => {
+				if (frame === null) return;
+				if (event.source !== frame.contentWindow) return;
+				const data = event.data;
+				if (data == null || data.__dvk !== "height" || data.id !== frameId) return;
+				const height = Number(data.height);
+				if (!Number.isFinite(height) || height <= 0) return;
+				measured = true;
+				frame.style.height = `${Math.min(limits.maxPreviewHeight, Math.ceil(height))}px`;
+			};
 			const destroyFrame = () => {
 				frame?.remove();
 				frame = null;
+				view.removeEventListener?.("message", onMessage);
 			};
 			const mountFrame = () => {
 				if (frame !== null) return;
+				const mode = config.previewHeightMode;
 				frame = doc.createElement("iframe");
 				frame.className = "dvk-frame";
 				frame.title = t("html.frameTitle", "HTML preview");
 				frame.setAttribute("referrerpolicy", "no-referrer");
-				frame.setAttribute("sandbox", config.htmlAllowScripts ? "allow-scripts" : "");
-				frame.style.height = `${estimateHeight(request.source, limits.maxPreviewHeight)}px`;
-				frame.srcdoc = withCharset(request.source);
+				const estimated = estimateHeight(request.source, limits.maxPreviewHeight);
+				const initial = mode === "fixed" ? limits.maxPreviewHeight : estimated;
+				if (mode === "measure") {
+					frame.setAttribute("sandbox", "allow-scripts");
+					frame.style.height = `${initial}px`;
+					frame.srcdoc = buildMeasuringDocument(request.source, frameId, initial);
+					view.addEventListener?.("message", onMessage);
+				} else {
+					frame.setAttribute("sandbox", config.htmlAllowScripts ? "allow-scripts" : "");
+					frame.style.height = `${initial}px`;
+					frame.srcdoc = withCharset(request.source);
+				}
 				mount(frame);
+				if (mode === "measure") setTimeout(() => {
+					if (!measured && frame !== null) frame.style.height = `${estimated}px`;
+				}, 600);
 			};
 			return {
 				views: [{
@@ -1349,7 +1510,24 @@ const DEFAULT_CONFIG = Object.freeze({
 	disabledRendererIds: Object.freeze([]),
 	maxSourceBytes: 262144,
 	/**
-	* Tallest an embedded preview may grow, in CSS pixels.
+	* How an embedded HTML preview decides its height.
+	*
+	*   'measure' — size the frame to the document's real height, capped. Short
+	*               content shows fully with no empty band; long content scrolls.
+	*               Falls back to 'fit' if the measurement never arrives.
+	*   'fit'     — estimate the rendered height. Same intent as 'measure',
+	*               without the measuring frame, so a short estimate scrolls.
+	*   'fixed'   — always exactly `maxPreviewHeight`. Fully predictable, and
+	*               short content leaves space below itself.
+	*
+	* 'fixed' does not remove the empty space, it only makes it constant; the
+	* first reported problem was an empty band mid-conversation, which is why the
+	* default measures rather than fixing a number.
+	*/
+	previewHeightMode: "measure",
+	/**
+	* Tallest an embedded preview may grow, in CSS pixels — and, under
+	* `previewHeightMode: 'fixed'`, the exact height.
 	*
 	* 320 rather than a taller figure because a preview is a glance, not a page
 	* view: at 520 a short document left a band of empty frame in the middle of
@@ -1397,7 +1575,9 @@ function resolveConfig(patch) {
 		const value = patch[key];
 		if (value === void 0) continue;
 		if (key === "disabledRendererIds") out[key] = Array.isArray(value) ? value.filter((id) => typeof id === "string") : [];
-		else if (typeof value === typeof DEFAULT_CONFIG[key]) out[key] = value;
+		else if (key === "previewHeightMode") {
+			if (value === "measure" || value === "fit" || value === "fixed") out[key] = value;
+		} else if (typeof value === typeof DEFAULT_CONFIG[key]) out[key] = value;
 	}
 	return out;
 }
@@ -2210,7 +2390,7 @@ const STYLES = `
 * @module client
 */
 const NAMESPACE = "dsh-viewer-kit";
-const VERSION = "0.8.0";
+const VERSION = "0.9.0";
 /**
 * Handle to the live activation, so a second `apply` can retire the first.
 * See the guard inside `apply`.

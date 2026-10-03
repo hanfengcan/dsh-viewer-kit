@@ -18,7 +18,24 @@ export const DEFAULT_CONFIG = Object.freeze({
   disabledRendererIds: Object.freeze([]),
   maxSourceBytes: 256 * 1024,
   /**
-   * Tallest an embedded preview may grow, in CSS pixels.
+   * How an embedded HTML preview decides its height.
+   *
+   *   'measure' — size the frame to the document's real height, capped. Short
+   *               content shows fully with no empty band; long content scrolls.
+   *               Falls back to 'fit' if the measurement never arrives.
+   *   'fit'     — estimate the rendered height. Same intent as 'measure',
+   *               without the measuring frame, so a short estimate scrolls.
+   *   'fixed'   — always exactly `maxPreviewHeight`. Fully predictable, and
+   *               short content leaves space below itself.
+   *
+   * 'fixed' does not remove the empty space, it only makes it constant; the
+   * first reported problem was an empty band mid-conversation, which is why the
+   * default measures rather than fixing a number.
+   */
+  previewHeightMode: 'measure',
+  /**
+   * Tallest an embedded preview may grow, in CSS pixels — and, under
+   * `previewHeightMode: 'fixed'`, the exact height.
    *
    * 320 rather than a taller figure because a preview is a glance, not a page
    * view: at 520 a short document left a band of empty frame in the middle of
@@ -65,6 +82,10 @@ export function resolveConfig(patch) {
     if (value === undefined) continue
     if (key === 'disabledRendererIds') {
       out[key] = Array.isArray(value) ? value.filter((id) => typeof id === 'string') : []
+    } else if (key === 'previewHeightMode') {
+      // An enum cannot be checked by `typeof`, which would accept any string and
+      // leave the renderer comparing against a mode that does not exist.
+      if (value === 'measure' || value === 'fit' || value === 'fixed') out[key] = value
     } else if (typeof value === typeof DEFAULT_CONFIG[key]) {
       out[key] = value
     }

@@ -81,6 +81,21 @@ function eq(actual, expected, message) {
 const tick = () => new Promise((done) => setTimeout(done, 0))
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
 
+/**
+ * Read the frame id out of a generated preview document.
+ *
+ * The id is what the measuring frame echoes back, and it is generated per
+ * surface, so a test has to read it from the document rather than construct it.
+ *
+ * @param {string} srcdoc
+ * @returns {string}
+ */
+function frameIdOf(srcdoc) {
+  const match = /id:\s*"([^"]+)"/.exec(srcdoc)
+  if (match === null) throw new Error('no frame id in the preview document')
+  return match[1]
+}
+
 // ---------------------------------------------------------------------------
 // core: no DOM anywhere in this section
 // ---------------------------------------------------------------------------
@@ -233,7 +248,7 @@ await test('view state degrades to memory when storage is unavailable', () => {
 
 const { createDomSeam } = await import('../src/client/dom-seam.js')
 const { PLAIN_SETTLE_MS } = await import('../src/client/dom-contract.js')
-const { createHtmlRenderer } = await import('../src/client/renderers/html.js')
+const { createHtmlRenderer, MEASURE_TIMEOUT_MS } = await import('../src/client/renderers/html.js')
 
 process.stdout.write('\nseam (fixture DOM)\n')
 
@@ -303,16 +318,35 @@ await test('the native code subtree is never touched', () => {
   eq(content(env.document).children.length, 2, 'our root is appended after it, never merged into it')
 })
 
-await test('the preview mounts a sandboxed frame and hides the source', () => {
+await test('the preview mounts a frame and hides the source', () => {
   const { env } = mount(conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) }]))
   eq(content(env.document).getAttribute('data-dvk-mode'), 'preview', 'it opened in preview')
   const f = frame(env.document)
   assert(f !== null, 'a preview frame exists')
   eq(f.parentNode, ourRoot(env.document), 'mounted inside our own root')
-  eq(f.getAttribute('sandbox'), '', 'sandboxed with no privileges by default')
   eq(f.getAttribute('referrerpolicy'), 'no-referrer', 'no referrer leakage')
-  assert(f.srcdoc.includes('<h1>Hello from the preview</h1>'), 'the authored document is the frame content')
+
+  // The default mode MEASURES, which needs a script in the outer frame — a real
+  // change from the original `sandbox=""`, and the reason the two-frame layout
+  // exists: the model's document sits in an inner frame with no `allow-scripts`,
+  // so its own scripts stay blocked by the sandbox rather than by a policy.
+  // `previewHeightMode: 'fit'` keeps the single, capability-free frame.
+  eq(f.getAttribute('sandbox'), 'allow-scripts', 'the outer frame hosts the measuring script')
+  assert(
+    /<iframe id="dvk-inner" sandbox="allow-same-origin">/.test(f.srcdoc),
+    'the model document is in a frame that may be READ but may not run its own scripts',
+  )
+})
+
+await test('a no-script preview mode keeps the original capability-free frame', () => {
+  const { env } = mount(
+    conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) }]),
+    { config: { previewHeightMode: 'fit' } },
+  )
+  const f = frame(env.document)
+  eq(f.getAttribute('sandbox'), '', 'sandboxed with no privileges at all')
   assert(f.srcdoc.startsWith('<meta charset="utf-8">'), 'charset declared')
+  assert(f.srcdoc.includes('<h1>Hello from the preview</h1>'), 'the authored document is the frame content')
 })
 
 await test('the preview never grants allow-same-origin, even with scripts on', () => {
@@ -703,7 +737,10 @@ await test('a claimed block opens in preview without any click', () => {
   eq(run.applied.ok, true, 'apply() did not throw')
   eq(run.mode(), 'preview', 'the block is in preview mode on arrival')
   assert(run.env.document.querySelector('iframe') !== null, 'the preview is already mounted')
-  eq(run.env.document.querySelector('iframe').getAttribute('sandbox'), '', 'sandboxed with no capabilities')
+  // The default mode measures, so the outer frame carries a script. The model's
+  // document is in the inner frame, which has no `allow-scripts` — see the
+  // sandbox assertions in the "sandboxed frame" test for the full reasoning.
+  eq(run.env.document.querySelector('iframe').getAttribute('sandbox'), 'allow-scripts', 'the measuring frame')
 
   // The switch still reads correctly: preview pressed, code not.
   const sw = run.env.document.querySelector('[data-dvk-switch]')
@@ -1112,6 +1149,127 @@ await test('the conversation boundary accepts any of the chat containers', () =>
       `<div ${attr}="x">${codeBlockFixture({ lang: 'html', code: HTML_SAMPLE })}</div>`,
     )
     eq(env.document.querySelectorAll('[data-dvk-switch]').length, 1, `claimed under ${attr}`)
+  }
+})
+
+await test('the measured height wins over the estimate, and is capped', () => {
+  // The whole point of the measuring frame: the frame follows the document's
+  // real height instead of a guess, so short content shows fully and only
+  // genuinely long content scrolls.
+  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p>hi</p>' }) }])
+  const { env } = mount(html, { config: { maxPreviewHeight: 320 } })
+  const frame = env.document.querySelector('iframe')
+  const view = env.document.defaultView
+
+  eq(frame.getAttribute('sandbox'), 'allow-scripts', 'the outer frame runs only our measuring script')
+  assert(frame.srcdoc.includes('allow-same-origin'), 'the inner frame is the one that may be read')
+  assert(
+    /<iframe id="dvk-inner" sandbox="allow-same-origin">/.test(frame.srcdoc),
+    'and the inner frame has NO allow-scripts, so the model\'s scripts stay blocked by the sandbox',
+  )
+  assert(!/sandbox="allow-scripts allow-same-origin"/.test(frame.srcdoc), 'never both together')
+
+  // It starts at the estimate so it is never a zero-height sliver.
+  assert(frame.style.height !== '0px' && frame.style.height.endsWith('px'), `starts sized, got ${frame.style.height}`)
+
+  // A message from the frame's own window replaces the guess.
+  view.postMessage({ source: frame.contentWindow, data: { __dvk: 'height', id: frameIdOf(frame.srcdoc), height: 212 } })
+  eq(frame.style.height, '212px', 'the measured height replaced the estimate')
+
+  // Capped, because a preview is a glance rather than a page view.
+  view.postMessage({ source: frame.contentWindow, data: { __dvk: 'height', id: frameIdOf(frame.srcdoc), height: 9000 } })
+  eq(frame.style.height, '320px', 'a very tall document stops at the cap')
+})
+
+await test('a message from another window, or of another shape, is ignored', () => {
+  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p>hi</p>' }) }])
+  const { env } = mount(html, { config: { maxPreviewHeight: 320 } })
+  const frame = env.document.querySelector('iframe')
+  const view = env.document.defaultView
+  const before = frame.style.height
+
+  // Identity is checked by SOURCE, not origin: the sender is an opaque-origin
+  // frame, so `event.origin` is the string "null" and carries no information.
+  view.postMessage({ source: { some: 'other window' }, data: { __dvk: 'height', id: frameIdOf(frame.srcdoc), height: 5 } })
+  eq(frame.style.height, before, 'a message from a different window is ignored')
+  view.postMessage({ source: frame.contentWindow, data: { nope: true } })
+  eq(frame.style.height, before, 'an unrelated message is ignored')
+  view.postMessage({ source: frame.contentWindow, data: { __dvk: 'height', id: 'someone-elses-frame', height: 5 } })
+  eq(frame.style.height, before, 'another frame id is ignored')
+  view.postMessage({ source: frame.contentWindow, data: { __dvk: 'height', id: frameIdOf(frame.srcdoc), height: 'tall' } })
+  eq(frame.style.height, before, 'a non-numeric height is ignored')
+  view.postMessage({ source: frame.contentWindow, data: { __dvk: 'height', id: frameIdOf(frame.srcdoc), height: 0 } })
+  eq(frame.style.height, before, 'a zero height is ignored rather than collapsing the frame')
+})
+
+await test('the model document is carried as base64, so no markup can escape the wrapper', () => {
+  // `</script>` inside a JavaScript string literal still ends the script
+  // element as far as the HTML parser is concerned. Base64's alphabet cannot
+  // terminate anything, which is why it is used instead of escaping rules.
+  const hostile = '<p>a</p></script><script>parent.document.body.innerHTML="pwned"</script>'
+  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: hostile }) }])
+  const { env } = mount(html, { config: { maxPreviewHeight: 320 } })
+  const frame = env.document.querySelector('iframe')
+
+  assert(!frame.srcdoc.includes('parent.document'), 'the payload is not present as literal markup')
+  assert(!frame.srcdoc.includes('pwned'), 'and certainly not as executable text')
+  // The wrapper legitimately closes its own script element once, at the very end.
+  eq(frame.srcdoc.split('</' + 'script>').length - 1, 1, 'exactly one script close, the wrapper\'s own')
+  // The fixture legitimately renders the code TEXT into the host page, so
+  // 'pwned' appearing as text proves nothing. What matters is that no element
+  // was created from it and no script element exists in the host document.
+  eq(env.document.querySelectorAll('script').length, 0, 'no script element reached the host document')
+})
+
+await test('disposing a preview removes its message listener', () => {
+  // A leaked listener per preview would accumulate for the life of the page and
+  // keep removed frames alive.
+  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p>hi</p>' }) }])
+  const { env, seam } = mount(html, { config: { maxPreviewHeight: 320 } })
+  eq(env.document.defaultView.listenerCount(), 1, 'one listener while the preview is mounted')
+  seam.dispose()
+  eq(env.document.defaultView.listenerCount(), 0, 'and none after dispose')
+})
+
+await test('a measurement that never arrives leaves the estimate in place', async () => {
+  // The fallback is what makes the measuring frame safe to ship: its failure
+  // mode is "slightly wrong height", never "no preview".
+  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p>hi</p>' }) }])
+  const { env } = mount(html, { config: { maxPreviewHeight: 320 } })
+  const frame = env.document.querySelector('iframe')
+  const initial = frame.style.height
+  await sleep(MEASURE_TIMEOUT_MS + 80)
+  eq(frame.style.height, initial, 'still a sane height, not collapsed')
+  assert(frame.style.height !== '0px', 'and never zero')
+})
+
+await test('previewHeightMode picks between measured, fitted and fixed frames', async () => {
+  const { estimateHeight: estimate } = await import('../src/client/renderers/html.js')
+  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p>hi</p>' }) }])
+  const frameOf = (config) => mount(html, { config }).env.document.querySelector('iframe')
+  const fitted = estimate('<p>hi</p>', 320)
+
+  const measured = frameOf({ maxPreviewHeight: 320 })
+  eq(measured.style.height, `${fitted}px`, 'measure starts at the estimate while it measures')
+  assert(measured.getAttribute('sandbox') === 'allow-scripts', 'and uses the measuring frame')
+
+  const fit = frameOf({ previewHeightMode: 'fit', maxPreviewHeight: 320 })
+  eq(fit.style.height, `${fitted}px`, 'fit uses the estimate')
+  eq(fit.getAttribute('sandbox'), '', 'fit needs no script permission at all')
+  eq(fit.srcdoc.includes('dvk-inner'), false, 'and no inner frame')
+
+  eq(frameOf({ previewHeightMode: 'fixed', maxPreviewHeight: 320 }).style.height, '320px', 'fixed is the cap, always')
+  eq(frameOf({ previewHeightMode: 'fixed', maxPreviewHeight: 180 }).style.height, '180px', 'fixed follows the configured height')
+})
+
+await test('an unknown previewHeightMode falls back to measure rather than breaking', async () => {
+  // A string enum cannot be validated by `typeof`, which would accept any
+  // string and leave the renderer comparing against a mode that does not exist.
+  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p>hi</p>' }) }])
+  for (const mode of ['nonsense', '', 42, null]) {
+    const { kit, env } = mount(html, { config: { previewHeightMode: mode } })
+    eq(kit.config().previewHeightMode, 'measure', `mode ${JSON.stringify(mode)} fell back to measure`)
+    assert(env.document.querySelector('iframe') !== null, 'and the preview still mounted')
   }
 })
 

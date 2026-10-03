@@ -102,7 +102,14 @@
  *   off. Read-only because every consumer only ever asks `includes`.
  * @property {number} [maxSourceBytes] Sources above this size keep the native
  *   code block instead of being handed to a renderer.
- * @property {number} [maxPreviewHeight] Pixel cap for an embedded preview.
+ * @property {number} [maxPreviewHeight] Pixel cap for an embedded preview, and
+ *   the exact height under `previewHeightMode: 'fixed'`.
+ * @property {'measure' | 'fit' | 'fixed'} [previewHeightMode] How an HTML
+ *   preview decides its height. `measure` sizes the frame to the document's
+ *   real, measured height (no empty band, and a scrollbar only when the content
+ *   genuinely exceeds the cap); `fit` estimates that height without a measuring
+ *   frame; `fixed` gives every document `maxPreviewHeight`. **`measure` by
+ *   default**, falling back to `fit` if no measurement arrives.
  * @property {number} [chartHeight] Height of an embedded chart, in CSS pixels.
  *   Charts need a definite height; a canvas in an auto-height box renders at
  *   zero.

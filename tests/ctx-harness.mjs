@@ -148,6 +148,14 @@ export function activateBundle(bundleSource, options = {}) {
     queueMicrotask,
     setTimeout,
     clearTimeout,
+    // Standard web globals the renderer legitimately uses. A `vm` context is
+    // bare, so omitting one shows up as a ReferenceError inside `apply` — which
+    // reads exactly like a product bug. `TextEncoder` is here because the HTML
+    // preview base64-encodes the model's document.
+    TextEncoder,
+    TextDecoder,
+    atob,
+    btoa,
     console: {
       log: (...values) => harness.log.push(values.join(' ')),
       error: (...values) => harness.log.push(`ERROR ${values.join(' ')}`),

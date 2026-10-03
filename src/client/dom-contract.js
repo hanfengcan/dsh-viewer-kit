@@ -26,6 +26,29 @@
  * </div>
  * ```
  *
+ * ## The content node generates no box
+ *
+ * Verified in the shipped shell stylesheet
+ * (`dsh-web-frontend/dist/assets/index-BPHePDI_.css`):
+ *
+ * ```css
+ * ._content_7gxqk_74 { display: contents }
+ * ```
+ *
+ * `display: contents` means the content node has **no box at all** — its
+ * children are laid out as children of `.block`. Three consequences this plugin
+ * depends on, each of which would break silently if that rule ever changed:
+ *
+ * 1. The block's height is exactly the height of its visible child. There is no
+ *    independent container height, so an empty band below a preview is always
+ *    the preview's own doing, never the block reserving space.
+ * 2. A `>` child selector written against the content node still matches its
+ *    children, which is how the view switch hides one view and shows the other.
+ * 3. DSH's own code view sets no height either — `._block :where(pre)` carries
+ *    only `padding` and `overflow-x: auto` — so a preview that fixed its own
+ *    height would disagree with the view it swaps with. That is the argument for
+ *    measuring instead: it reproduces the sibling's "content decides" semantics.
+ *
  * @typedef {object} CodeBlockDom
  */
 
