@@ -152,8 +152,12 @@ __DSH_VIEWER_KIT__.diagnose()
 | `outsideConversation > 0` | 那些块在其它标签页，**故意不碰**，不是漏认 |
 | `enhanced > 0` | 在工作，去看代码块头部有没有切换按钮 |
 
-> 排障时可能去翻 profile 的 `cordis.patch.yml`。那里的一行是 `dsh plugin add` **生成**的，
-> **别自己加** —— 下次任何 `dsh plugin add` 都会重写整个文件，手加的行会跟着插件一起静默消失。
+> profile 的 `cordis.patch.yml` 有两种条目，**别混为一谈**：
+>
+> - **`config:` 覆盖** —— 这就是那个文件的主要用途，按 §1 放心写，改完刷新即生效；
+> - **`insert:` 行** —— 本插件那一行在**包自己的** `cordis.patch.yml` 里，
+>   由 `dsh.profile.bundles` 选中后生效。**不要在 profile 里再手写一遍**：
+>   那是重复的生成物，下次任何 `dsh plugin add` 都会重写整个文件，手写的那行会被冲掉。
 
 ---
 
