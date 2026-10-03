@@ -1,0 +1,62 @@
+{
+  "name": "dsh-viewer-kit",
+  "version": "0.3.1",
+  "description": "Pluggable content renderers for the DeepSeek Harness conversation: preview/code switching for HTML, and a renderer registry to grow.",
+  "type": "module",
+  "license": "MIT",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "client",
+    "src",
+    "docs",
+    "cordis.patch.yml",
+    "LICENSE",
+    "README.md"
+  ],
+  "keywords": [
+    "deepseek",
+    "dsh",
+    "dsh-plugin",
+    "renderer",
+    "markdown",
+    "preview"
+  ],
+  "scripts": {
+    "build": "tsdown && node scripts/build-host.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node tests/run.mjs",
+    "repro": "node tests/repro-activation.mjs",
+    "check": "npm run typecheck && npm run build && npm test && npm run repro"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "devDependencies": {
+    "tsdown": "^0.23.0",
+    "typescript": "^5.9.2",
+    "unrun": "^0.3.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    }
+  }
+}

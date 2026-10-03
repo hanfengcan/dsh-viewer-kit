@@ -1,0 +1,1816 @@
+window.__ModuleLoader__.load({ id: "dsh-viewer-kit", factory: (require) => {
+  var module = { exports: {} };
+  var exports = module.exports;
+Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
+//#region src/client/dom-contract.js
+/**
+* The one place that knows what DSH's rendered code block looks like.
+*
+* Everything here was read out of the shipped `@deepseek-ai/dsh@0.2.0-rc.2`
+* bundles; the citations are the contract to re-check when upgrading DSH.
+* No other module may hard-code a selector.
+*
+* @module dom-contract
+*/
+/**
+* DOM contract for the markdown code block, as produced by `CodeBlock` in
+* `@deepseek-ai/dsh-client-ui-primitives`.
+*
+* ```html
+* <div class="<block> md-code-block" data-code-wrap>
+*   <div class="<bannerWrap>">
+*     <div class="<header>" data-code-block-banner>
+*       <div class="<heading>"><span class="<language>">html</span></div>
+*       <div class="<actions>">…wrap, copy…</div>
+*     </div>
+*   </div>
+*   <div class="<content>" data-code-block-content>
+*     <div class="shiki"><pre class="shiki css-variables">…</pre></div>
+*   </div>
+* </div>
+* ```
+*
+* @typedef {object} CodeBlockDom
+*/
+/**
+* Selector for one rendered code block.
+*
+* `.md-code-block` is a literal class the shipped component always emits
+* alongside the hashed CSS-module class (`primitives/lib/index.js:10875`).
+* The banner attribute deliberately is *not* part of this selector: it lives
+* on the header inside the block, not on the block root. A surface that finds
+* no banner declines, which is the correct outcome for a block shape we do
+* not recognise.
+*/
+const CODE_BLOCK_SELECTOR = ".md-code-block";
+/** The banner; the only place the fence language is written down. */
+const BANNER_SELECTOR = "[data-code-block-banner]";
+/**
+* The content viewport. The shipped CSS calls it out by name as the node
+* consumers may take over:
+* "Consumers may turn the stable content node into a viewport without
+*  changing the default CodeBlock layout."
+* — `primitives/lib/markdown/CodeBlock.module.css:73-76`
+*/
+const CONTENT_SELECTOR = "[data-code-block-content]";
+/**
+* Attribute marking the row a chat node renders into. Used as the view-state
+* scope so two different messages do not share a selection.
+* (`dsh-client-ui-chat/lib/client.js` sets `data-chat-node-key` on flow rows.)
+*/
+const NODE_SCOPE_ATTRIBUTE = "data-chat-node-key";
+/** Our own marker on the nodes we add, used for cleanup and for self-check. */
+const ROOT_ATTRIBUTE = "data-dvk-root";
+/** Our own view mode on the content node; never managed by React. */
+const MODE_ATTRIBUTE = "data-dvk-mode";
+/** Our own marker on the view switch, so cleanup finds it again. */
+const SWITCH_ATTRIBUTE = "data-dvk-switch";
+
+//#endregion
+//#region src/client/contract.js
+/**
+* Shared vocabulary for the whole kit.
+*
+* Nothing in this file touches the DOM: the seam, the Kit and every renderer
+* agree on the shapes declared here, which is what lets the core be unit
+* tested under plain Node and lets a renderer be written without importing
+* anything from the seam.
+*
+* @module contract
+*/
+/**
+* Where a piece of renderable content was found. `code-block` is the only
+* source in v0; the other two exist so a future tool-call or document source
+* can reuse the identical pipeline instead of growing a parallel one.
+*
+* @typedef {'code-block' | 'tool-call' | 'document'} SurfaceKind
+*/
+/**
+* One normalized unit of renderable content.
+*
+* @typedef {object} RenderRequest
+* @property {string} id Stable identity for view-state. Content-derived, so
+*   the same code keeps its view selection across React re-renders and
+*   scroll-back, while genuinely different content starts fresh.
+* @property {SurfaceKind} surface Which host surface produced it.
+* @property {string} lang Normalized language id, `''` when the fence has none.
+* @property {string} source Raw, unmodified text.
+* @property {{ info?: string }} [meta] Extra fence information, if any.
+*/
+/**
+* Host services handed to a renderer instance. Deliberately narrow: a renderer
+* can build DOM, mount it, and report failures, but it cannot reach into the
+* seam or address the host page.
+*
+* @typedef {object} RenderHost
+* @property {RenderRequest} request
+* @property {Document} document Document to create nodes in.
+* @property {(node: Node) => void} mount Append a node to the surface's own
+*   view root. The root is empty on every `enter` that needs a fresh view, so
+*   a renderer never has to think about tearing down its own container.
+* @property {() => void} clearView Empty the surface's view root.
+* @property {{ maxSourceBytes: number, maxPreviewHeight: number }} limits
+* @property {(error: unknown) => void} fail Report a fatal render error; the
+*   host degrades to the native code block.
+* @property {() => Readonly<ViewerKitConfig>} config
+*/
+/**
+* One selectable view of a rendered item, e.g. preview vs code.
+*
+* @typedef {object} ViewDescriptor
+* @property {string} id
+* @property {string} label
+*/
+/**
+* A live renderer attached to one surface.
+*
+* @typedef {object} RendererInstance
+* @property {ViewDescriptor[]} views At least one. The host always appends its
+*   own built-in `code` view, so a renderer only has to implement its
+*   enhanced view.
+* @property {(viewId: string) => void | Promise<void>} enter
+* @property {() => void} dispose
+*/
+/**
+* The contract every renderer implements. Adding a renderer means adding a
+* file that satisfies this and one `kit.register` call — nothing else.
+*
+* @typedef {object} Renderer
+* @property {string} id Unique; also the deterministic tie-break key.
+* @property {string} [label] Human name for diagnostics.
+* @property {number} [priority] Higher wins. Default 0.
+* @property {(request: RenderRequest) => boolean} match Claim test. Must be
+*   cheap and side-effect free — the host may call it repeatedly.
+* @property {(host: RenderHost) => RendererInstance | null} create Build an
+*   instance, or return null to decline (too large, unsupported shape, …).
+*/
+/**
+* @typedef {object} ViewerKitConfig
+* @property {boolean} enabled Master switch.
+* @property {readonly string[]} [disabledRendererIds] Renderers the user turned
+*   off. Read-only because every consumer only ever asks `includes`.
+* @property {number} [maxSourceBytes] Sources above this size keep the native
+*   code block instead of being handed to a renderer.
+* @property {number} [maxPreviewHeight] Pixel cap for an embedded preview.
+* @property {boolean} [htmlAllowScripts] Let previewed HTML run scripts inside
+*   an opaque-origin sandbox. Off by default; see docs/01-architecture.md §8.
+* @property {boolean} [defaultToPreview] Open a freshly seen item in its
+*   enhanced view instead of the code view.
+*/
+/** The view every surface always offers, rendered by the host itself. */
+const CODE_VIEW = Object.freeze({
+	id: "code",
+	label: "code"
+});
+/** Fence languages that mean the same thing. Keys are already normalized. */
+const LANG_ALIASES = Object.freeze({
+	htm: "html",
+	xhtml: "html",
+	chart: "echarts",
+	tsv: "csv"
+});
+/**
+* Normalize a fence language to the same form the host renderer computes.
+*
+* DSH reads the language as `/^[\w-]+/` off the front of the fence info string
+* (`dsh-client-ui-primitives/lib/index.js:11355`), so we must agree with it
+* or a fence like `html title="x"` would claim a language of `html title="x"`
+* and match nothing.
+*
+* @param {string | null | undefined} raw
+* @returns {string} lowercased id, `''` when there is none
+*/
+function normalizeLang(raw) {
+	if (typeof raw !== "string") return "";
+	const head = /^[\w-]+/.exec(raw.trim());
+	if (head === null) return "";
+	const lower = head[0].toLowerCase();
+	return LANG_ALIASES[lower] ?? lower;
+}
+/**
+* 32-bit FNV-1a over a string, with an explicit salt.
+*
+* @param {string} text
+* @param {number} salt
+* @returns {number} unsigned 32-bit
+*/
+function fnv1a(text, salt) {
+	let hash = (2166136261 ^ salt) >>> 0;
+	for (let index = 0; index < text.length; index += 1) {
+		hash ^= text.charCodeAt(index);
+		hash = Math.imul(hash, 16777619) >>> 0;
+	}
+	return hash >>> 0;
+}
+/**
+* Content fingerprint used as the view-state key.
+*
+* Two independent FNV passes plus the length: a collision would only ever
+* mean two different code blocks share a view *selection*, never that content
+* is rendered wrongly, but two passes make that effectively unreachable.
+*
+* @param {{ scope?: string, lang: string, source: string }} parts
+* @returns {string}
+*/
+function fingerprint(parts) {
+	const key = `${parts.scope ?? ""}\u0000${parts.lang}\u0000${parts.source}`;
+	const a = fnv1a(key, 0);
+	const b = fnv1a(key, 2654435769);
+	return `${a.toString(36)}.${b.toString(36)}.${key.length.toString(36)}`;
+}
+/**
+* Build a `RenderRequest`. One constructor so the id and the fields can never
+* drift apart.
+*
+* @param {{ surface: SurfaceKind, scope?: string, lang?: string, source: string, info?: string }} input
+* @returns {RenderRequest}
+*/
+function createRequest(input) {
+	const lang = input.lang ?? "";
+	const source = input.source;
+	/** @type {RenderRequest} */
+	const request = {
+		id: fingerprint({
+			scope: input.scope,
+			lang,
+			source
+		}),
+		surface: input.surface,
+		lang,
+		source
+	};
+	if (input.info !== void 0 && input.info !== "") request.meta = { info: input.info };
+	return request;
+}
+
+//#endregion
+//#region src/client/code-block-surface.js
+/**
+* Host surface for one code block.
+*
+* A surface owns exactly two things inside a block DSH rendered: a view
+* switch appended to the banner, and a root element appended to the content
+* viewport. It never mutates anything DSH created.
+*
+* The five invariants it promises (docs/01-architecture.md §6.4):
+*   1. only ever append nodes marked with `data-dvk-*`; never remove or
+*      reorder a node DSH created;
+*   2. show/hide by toggling *our* attribute on the content node, never by
+*      removing the native `<pre>`;
+*   3. the switch goes into the banner's trailing action group, whose child
+*      list React reconciles positionally and never extends past its own;
+*   4. the native source subtree is never touched, so switching back to code
+*      is byte-for-byte lossless;
+*   5. `dispose()` leaves the block exactly as it was found.
+*
+* @module code-block-surface
+*/
+/**
+* @param {{
+*   root: Element,
+*   source: string,
+*   lang: string,
+*   info: string,
+*   scope: string,
+*   kit: any,
+*   document: Document,
+*   t: (key: string, fallback: string) => string,
+*   onOutcome?: (rendererId: string | undefined) => void,
+* }} options
+* @returns {{ dispose: () => void, rendererId: string, enter: (viewId: string) => void } | null}
+*/
+function createCodeBlockSurface(options) {
+	const { root, source, info, scope, kit, document: doc, t } = options;
+	const report = options.onOutcome ?? (() => {});
+	const content = root.querySelector(CONTENT_SELECTOR);
+	const banner = root.querySelector(BANNER_SELECTOR);
+	if (content === null || banner === null) return null;
+	const request = kit.buildRequest({
+		surface: "code-block",
+		scope,
+		lang: normalizeLang(options.lang),
+		source,
+		info
+	});
+	const renderer = kit.negotiate(request);
+	if (renderer === null) {
+		report(void 0);
+		return null;
+	}
+	if (!kit.withinLimits(request)) {
+		report(renderer.id);
+		return null;
+	}
+	const viewRoot = doc.createElement("div");
+	viewRoot.setAttribute(ROOT_ATTRIBUTE, "true");
+	viewRoot.className = "dvk-view";
+	const host = kit.hostFor(request, (error) => {
+		console.error("[dsh-viewer-kit]", renderer.id, error);
+	}, {
+		document: doc,
+		mount: (node) => {
+			viewRoot.appendChild(node);
+		},
+		clearView: () => {
+			viewRoot.replaceChildren();
+		}
+	});
+	/** @type {import('./contract.js').RendererInstance | null} */
+	let instance = null;
+	try {
+		instance = kit.instantiate(renderer, request, host);
+	} catch {
+		instance = null;
+	}
+	if (instance === null) {
+		report(renderer.id);
+		return null;
+	}
+	const views = kit.viewsOf(instance);
+	if (views.length < 2) {
+		try {
+			instance.dispose();
+		} catch {}
+		report(renderer.id);
+		return null;
+	}
+	for (const stale of root.querySelectorAll(`[${SWITCH_ATTRIBUTE}]`)) stale.remove();
+	for (const stale of content.querySelectorAll(`[${ROOT_ATTRIBUTE}]`)) stale.remove();
+	const switchHost = banner.lastElementChild;
+	if (switchHost === null) {
+		try {
+			instance.dispose();
+		} catch {}
+		report(renderer.id);
+		return null;
+	}
+	const switcher = doc.createElement("div");
+	switcher.setAttribute(SWITCH_ATTRIBUTE, "true");
+	switcher.className = "dvk-switch";
+	switcher.setAttribute("role", "group");
+	switcher.setAttribute("aria-label", t("switch.label", "View"));
+	/** @type {HTMLButtonElement[]} */
+	const buttons = [];
+	for (const view of views) {
+		const button = doc.createElement("button");
+		button.type = "button";
+		button.className = "dvk-switch__item";
+		button.setAttribute("data-dvk-view", view.id);
+		button.setAttribute("aria-pressed", "false");
+		button.textContent = view.id === "code" ? t("view.code", "Code") : labelFor(view, t);
+		button.addEventListener("click", () => enter(view.id));
+		switcher.appendChild(button);
+		buttons.push(button);
+	}
+	switchHost.appendChild(switcher);
+	content.appendChild(viewRoot);
+	let disposed = false;
+	let current = "";
+	/**
+	* @param {import('./contract.js').ViewDescriptor} view
+	* @param {(key: string, fallback: string) => string} translate
+	* @returns {string}
+	*/
+	function labelFor(view, translate) {
+		return translate(`view.${view.id}`, view.label ?? view.id);
+	}
+	/**
+	* The view to open in: a remembered choice when it is still one of this
+	* block's views, otherwise the kit default.
+	*
+	* @returns {string}
+	*/
+	function pickInitialView() {
+		const remembered = kit.getView(request.id);
+		if (remembered !== void 0 && views.some((view) => view.id === remembered)) return remembered;
+		const fallback = kit.defaultView();
+		return views.some((view) => view.id === fallback) ? fallback : views[0].id;
+	}
+	/**
+	* @param {string} viewId
+	*/
+	function enter(viewId) {
+		if (disposed) return;
+		if (!views.some((view) => view.id === viewId)) return;
+		current = viewId;
+		kit.setView(request.id, viewId);
+		for (const button of buttons) button.setAttribute("aria-pressed", String(button.getAttribute("data-dvk-view") === viewId));
+		content.setAttribute(MODE_ATTRIBUTE, viewId === "code" ? "code" : "preview");
+		viewRoot.replaceChildren();
+		try {
+			const result = instance?.enter(viewId);
+			if (result != null && typeof result.then === "function")
+ /** @type {Promise<void>} */ result.catch((error) => host.fail(error));
+		} catch (error) {
+			host.fail(error);
+		}
+	}
+	current = pickInitialView();
+	enter(current);
+	report(renderer.id);
+	return {
+		rendererId: renderer.id,
+		enter,
+		dispose() {
+			if (disposed) return;
+			disposed = true;
+			try {
+				instance?.dispose();
+			} catch {}
+			viewRoot.remove();
+			switcher.remove();
+			content.removeAttribute(MODE_ATTRIBUTE);
+		}
+	};
+}
+
+//#endregion
+//#region src/client/dom-seam.js
+/**
+* Seam adapter: find code blocks, keep track of them, hand them to the host
+* surface, and clean up after the plugin is disabled.
+*
+* This module and `code-block-surface.js` are the only two that touch DSH's
+* DOM. Everything above them works in terms of `RenderRequest`.
+*
+* @module dom-seam
+*/
+/**
+* Read the message scope used to key view state.
+*
+* @param {Element} element
+* @returns {string}
+*/
+function scopeOf(element) {
+	return element.closest(`[${"data-chat-node-key"}]`)?.getAttribute("data-chat-node-key") ?? "";
+}
+/**
+* Whether a code block has stopped changing.
+*
+* The shipped renderer has two shapes and the difference is decisive:
+* while streaming, the content node's element child *is* the `<pre>`; once
+* settled and highlighted, the child is a `<div class="shiki">` wrapping it
+* (`primitives/lib/index.js:10823-10872`). That gives a signal with no timer
+* and no guessing. Blocks whose language has no highlighter take the plain
+* branch in both phases, so they fall back to a quiet-period check.
+*
+* @param {Element} content
+* @returns {{ settled: boolean, reason: string }}
+*/
+function settleState(content) {
+	const child = content.firstElementChild;
+	if (child === null) return {
+		settled: false,
+		reason: "empty"
+	};
+	if (child.tagName === "DIV") return {
+		settled: true,
+		reason: "highlighted"
+	};
+	return {
+		settled: false,
+		reason: "streaming-or-plain"
+	};
+}
+/**
+* Extract the fence language. It exists only as text in the banner, because
+* the shipped component does not put it in an attribute.
+*
+* @param {Element} root
+* @returns {string} raw language text, `''` when absent
+*/
+function readLang(root) {
+	const banner = root.querySelector("[data-code-block-banner]");
+	if (banner === null) return "";
+	const heading = banner.firstElementChild;
+	if (heading === null) return "";
+	return heading.firstElementChild?.textContent?.trim() ?? "";
+}
+/**
+* Extract the fence info string (the part after the language on the fence
+* line), when DSH's banner happens to carry it.
+*
+* @param {Element} root
+* @returns {string}
+*/
+function readInfo(root) {
+	const heading = root.querySelector("[data-code-block-banner]")?.firstElementChild;
+	if (heading == null) return "";
+	const children = heading.children;
+	return children.length > 1 ? (children[1].textContent ?? "").trim() : "";
+}
+/**
+* Extract the source text.
+*
+* @param {Element} content
+* @returns {string}
+*/
+function readSource(content) {
+	return content.querySelector("pre")?.textContent ?? "";
+}
+/**
+* @param {{
+*   kit: any,
+*   t?: (key: string, fallback: string) => string,
+*   root?: ParentNode,
+*   document?: Document,
+*   MutationObserver?: { new (callback: (records: object[]) => void): { observe: (target: unknown, options: object) => void, disconnect: () => void } },
+*   onError?: (error: unknown) => void,
+* }} options
+* @returns {{ scan: () => void, dispose: () => void, size: () => number, diagnose: () => object }}
+*/
+function createDomSeam(options) {
+	const kit = options.kit;
+	const doc = options.document ?? globalThis.document;
+	const root = options.root ?? doc.body;
+	const Observer = options.MutationObserver ?? globalThis.MutationObserver;
+	const t = options.t ?? ((_key, fallback) => fallback);
+	const onError = options.onError ?? ((error) => {
+		console.error("[dsh-viewer-kit] seam", error);
+	});
+	if (typeof Observer !== "function") {
+		onError(/* @__PURE__ */ new Error("MutationObserver is unavailable; dsh-viewer-kit stays inert"));
+		return {
+			scan: () => {},
+			dispose: () => {},
+			size: () => 0,
+			diagnose: () => ({
+				blocks: 0,
+				withBanner: 0,
+				withContent: 0,
+				settled: 0,
+				enhanced: 0,
+				pending: 0,
+				languages: [],
+				unclaimed: []
+			})
+		};
+	}
+	/** @type {WeakMap<Element, { dispose: () => void }>} */
+	const surfaces = /* @__PURE__ */ new WeakMap();
+	/** @type {Map<Element, number>} */
+	const quietTimers = /* @__PURE__ */ new Map();
+	/** @type {Map<Element, number>} */
+	const retryCounts = /* @__PURE__ */ new Map();
+	let disposed = false;
+	/**
+	* Decide whether a block is ready, and either take it over or schedule a
+	* re-check for a plain block that has gone quiet.
+	*
+	* @param {Element} element
+	*/
+	function evaluate(element) {
+		if (disposed || surfaces.has(element)) return;
+		const content = element.querySelector(CONTENT_SELECTOR);
+		if (content === null) {
+			schedule(element);
+			return;
+		}
+		const { settled } = settleState(content);
+		if (!settled) {
+			schedule(element);
+			return;
+		}
+		const source = readSource(content);
+		if (source.trim() === "") {
+			schedule(element);
+			return;
+		}
+		try {
+			const surface = createCodeBlockSurface({
+				root: element,
+				source,
+				lang: readLang(element),
+				info: readInfo(element),
+				scope: scopeOf(element),
+				kit,
+				document: doc,
+				t,
+				onOutcome: (rendererId) => kit.noteSurface(rendererId)
+			});
+			if (surface === null) return;
+			surfaces.set(element, surface);
+			const timer = quietTimers.get(element);
+			if (timer !== void 0) clearTimeout(timer);
+			quietTimers.delete(element);
+			retryCounts.delete(element);
+		} catch (error) {
+			onError(error);
+		}
+	}
+	/**
+	* Re-check a block after a quiet period.
+	*
+	* The MutationObserver is the real signal: DSH swaps the content node's
+	* child when the fence closes, and that is a `childList` mutation we already
+	* see. This timer is only the backstop for a mutation that arrived before
+	* the node had its final shape, so it is bounded — a fence that never
+	* settles (a tool still streaming, a block the host renders some other way)
+	* must not leave a timer polling for the life of the page.
+	*
+	* @param {Element} element
+	*/
+	function schedule(element) {
+		if (disposed || quietTimers.has(element)) return;
+		const attempts = (retryCounts.get(element) ?? 0) + 1;
+		if (attempts > 100) return;
+		retryCounts.set(element, attempts);
+		quietTimers.set(element, setTimeout(() => {
+			quietTimers.delete(element);
+			evaluate(element);
+		}, 300));
+	}
+	function scan() {
+		if (disposed) return;
+		for (const element of root.querySelectorAll(CODE_BLOCK_SELECTOR)) evaluate(element);
+	}
+	const observer = new Observer((records) => {
+		if (disposed) return;
+		for (const record of records) {
+			for (const node of record.addedNodes) {
+				if (node.nodeType !== 1) continue;
+				const element = node;
+				if (element.matches(".md-code-block")) evaluate(element);
+				for (const nested of element.querySelectorAll(CODE_BLOCK_SELECTOR)) evaluate(nested);
+			}
+			for (const node of record.removedNodes) {
+				if (node.nodeType !== 1) continue;
+				const element = node;
+				const surface = surfaces.get(element);
+				if (surface !== void 0) {
+					surface.dispose();
+					surfaces.delete(element);
+				}
+			}
+			if (record.type === "childList" && record.target?.nodeType === 1) evaluate(record.target.closest(".md-code-block") ?? record.target);
+		}
+	});
+	observer.observe(root, {
+		childList: true,
+		subtree: true,
+		characterData: false
+	});
+	return {
+		scan,
+		size: () => {
+			let count = 0;
+			for (const element of root.querySelectorAll(CODE_BLOCK_SELECTOR)) if (surfaces.has(element)) count += 1;
+			return count;
+		},
+		/**
+		* A picture of what the seam actually sees, for diagnosing "it isn't
+		* rendering anything". Every number here is something a fix would target,
+		* so one call in the console is enough to tell an install problem apart
+		* from a contract mismatch apart from a fence we do not claim.
+		*
+		* @returns {{
+		*   blocks: number,
+		*   withBanner: number,
+		*   withContent: number,
+		*   settled: number,
+		*   enhanced: number,
+		*   pending: number,
+		*   languages: string[],
+		*   unclaimed: string[],
+		* }}
+		*/
+		diagnose() {
+			const blocks = [...root.querySelectorAll(CODE_BLOCK_SELECTOR)];
+			const report = {
+				blocks: blocks.length,
+				withBanner: 0,
+				withContent: 0,
+				settled: 0,
+				enhanced: 0,
+				pending: 0,
+				languages: [],
+				unclaimed: []
+			};
+			/** @type {Set<string>} */
+			const languages = /* @__PURE__ */ new Set();
+			for (const element of blocks) {
+				if (surfaces.has(element)) report.enhanced += 1;
+				else report.pending += 1;
+				if (element.querySelector("[data-code-block-banner]") !== null) report.withBanner += 1;
+				const content = element.querySelector(CONTENT_SELECTOR);
+				if (content === null) continue;
+				report.withContent += 1;
+				if (settleState(content).settled) report.settled += 1;
+				const lang = normalizeLang(readLang(element));
+				languages.add(lang === "" ? "(none)" : lang);
+				if (!surfaces.has(element)) {
+					const request = kit.buildRequest({
+						surface: "code-block",
+						scope: scopeOf(element),
+						lang,
+						source: readSource(content)
+					});
+					if (kit.negotiate(request) === null) report.unclaimed.push(lang === "" ? "(none)" : lang);
+				}
+			}
+			report.languages = [...languages].sort();
+			return report;
+		},
+		dispose() {
+			if (disposed) return;
+			disposed = true;
+			observer.disconnect();
+			for (const timer of quietTimers.values()) clearTimeout(timer);
+			quietTimers.clear();
+			retryCounts.clear();
+			for (const element of root.querySelectorAll(CODE_BLOCK_SELECTOR)) surfaces.get(element)?.dispose();
+		}
+	};
+}
+
+//#endregion
+//#region src/client/renderers/html.js
+/**
+* HTML / SVG preview.
+*
+* The reference implementation of the renderer contract, and the smallest
+* useful one: it claims two fence languages and adds exactly one view.
+*
+* Security notes live in docs/01-architecture.md §8. The short version: the
+* preview is always an `<iframe>` with a `sandbox` attribute, and the two
+* attributes that would matter — `allow-scripts` and `allow-same-origin` —
+* are never granted together, so the document is always on an opaque origin
+* and cannot reach this page, its storage, or its cookies.
+*
+* @module renderers/html
+*/
+/** @type {Readonly<Record<string, string>>} */
+const LANGS = Object.freeze({
+	html: "HTML",
+	svg: "SVG"
+});
+/** A `<meta charset>` is prepended unless the document declares one. */
+function withCharset(source) {
+	if (/<meta[^>]+charset\s*=/i.test(source)) return source;
+	return `<meta charset="utf-8">\n${source}`;
+}
+/**
+* Pick a frame height from the source instead of measuring the document,
+* which a sandboxed frame will not let us observe. Tall sources grow to the
+* cap; short ones get a usable minimum. The document scrolls internally.
+*
+* @param {string} source
+* @param {number} cap
+* @returns {number}
+*/
+function estimateHeight(source, cap) {
+	const lines = source.split("\n").length;
+	return Math.max(160, Math.min(cap, 140 + lines * 20));
+}
+/**
+* @param {(key: string, fallback: string) => string} t
+* @returns {import('../contract.js').Renderer}
+*/
+function createHtmlRenderer(t) {
+	return {
+		id: "html",
+		label: "HTML",
+		priority: 10,
+		match(request) {
+			return request.lang === "html" || request.lang === "svg";
+		},
+		create(host) {
+			const { request, limits, document: doc, mount } = host;
+			const config = host.config();
+			/** @type {HTMLIFrameElement | null} */
+			let frame = null;
+			const destroyFrame = () => {
+				frame?.remove();
+				frame = null;
+			};
+			const mountFrame = () => {
+				if (frame !== null) return;
+				frame = doc.createElement("iframe");
+				frame.className = "dvk-frame";
+				frame.title = t("html.frameTitle", "HTML preview");
+				frame.setAttribute("referrerpolicy", "no-referrer");
+				frame.setAttribute("sandbox", config.htmlAllowScripts ? "allow-scripts" : "");
+				frame.style.height = `${estimateHeight(request.source, limits.maxPreviewHeight)}px`;
+				frame.srcdoc = withCharset(request.source);
+				mount(frame);
+			};
+			return {
+				views: [{
+					id: "preview",
+					label: LANGS[request.lang] ?? "Preview"
+				}],
+				enter(viewId) {
+					if (viewId === "code") {
+						destroyFrame();
+						return;
+					}
+					mountFrame();
+				},
+				dispose() {
+					destroyFrame();
+				}
+			};
+		}
+	};
+}
+
+//#endregion
+//#region src/client/view-state.js
+/**
+* Per-content view selection.
+*
+* Keyed by the content fingerprint rather than by DOM node: React rebuilds
+* these nodes freely, so an element-keyed store would lose the selection on
+* every re-render. Keyed by content, the selection survives scroll-back and
+* survives React, and a genuine content change starts a fresh default.
+*
+* Persistence is `sessionStorage` on purpose — a view choice is a UI
+* convenience, not data worth writing to disk, and it must not outlive a
+* renderer upgrade that may have dropped a view id.
+*
+* @module view-state
+*/
+const STORAGE_KEY = "dsh-viewer-kit:views:v1";
+/**
+* The real `sessionStorage` when it is usable, otherwise `null`.
+*
+* Availability is not the same as accessibility: private windows and embedded
+* webviews expose the object and still throw on write, so this probes it.
+*
+* @returns {Storage | null}
+*/
+function safeStorage() {
+	try {
+		const probe = "__dvk_probe__";
+		globalThis.sessionStorage?.setItem(probe, "1");
+		globalThis.sessionStorage?.removeItem(probe);
+		return globalThis.sessionStorage ?? null;
+	} catch {
+		return null;
+	}
+}
+/**
+* @param {{ storage?: Storage | null }} [options]
+* @returns {{
+*   get: (id: string) => string | undefined,
+*   set: (id: string, viewId: string) => void,
+*   clear: () => void,
+*   subscribe: (listener: () => void) => () => void,
+*   size: () => number,
+* }}
+*/
+function createViewState(options = {}) {
+	const storage = options.storage === void 0 ? safeStorage() : options.storage;
+	/**
+	* In-memory mirror, authoritative for reads. `sessionStorage` is only
+	* touched on write and on first read: a conversation with dozens of
+	* remembered blocks would otherwise re-parse the same JSON on every switch.
+	*
+	* @type {Map<string, string> | null}
+	*/
+	let cache = null;
+	/** @type {Set<() => void>} */
+	const listeners = /* @__PURE__ */ new Set();
+	/** @returns {Map<string, string>} */
+	function all() {
+		if (cache !== null) return cache;
+		/** @type {Map<string, string>} */
+		const loaded = /* @__PURE__ */ new Map();
+		if (storage !== null) try {
+			const raw = storage.getItem(STORAGE_KEY);
+			if (raw !== null) {
+				const parsed = JSON.parse(raw);
+				if (typeof parsed === "object" && parsed !== null) {
+					for (const [key, value] of Object.entries(parsed)) if (typeof value === "string") loaded.set(key, value);
+				}
+			}
+		} catch {}
+		cache = loaded;
+		return cache;
+	}
+	function persist() {
+		if (storage === null) return;
+		try {
+			storage.setItem(STORAGE_KEY, JSON.stringify(Object.fromEntries(all())));
+		} catch {}
+	}
+	function emit() {
+		for (const listener of listeners) listener();
+	}
+	return {
+		get(id) {
+			return all().get(id);
+		},
+		set(id, viewId) {
+			if (all().get(id) === viewId) return;
+			all().set(id, viewId);
+			persist();
+			emit();
+		},
+		clear() {
+			cache = /* @__PURE__ */ new Map();
+			if (storage !== null) try {
+				storage.removeItem(STORAGE_KEY);
+			} catch {}
+			emit();
+		},
+		subscribe(listener) {
+			listeners.add(listener);
+			return () => {
+				listeners.delete(listener);
+			};
+		},
+		size() {
+			return all().size;
+		}
+	};
+}
+
+//#endregion
+//#region src/client/kit.js
+/**
+* The Kit: registry, negotiation, view state and stats.
+*
+* This is the only surface a renderer, the seam, or a future host surface
+* talks to. It holds no DOM reference at all, which is what lets the
+* interesting logic — priority resolution, disabled renderers, size limits,
+* degradation — be tested under plain Node with no browser shim.
+*
+* @module kit
+*/
+/** @type {Required<import('./contract.js').ViewerKitConfig>} */
+const DEFAULT_CONFIG = Object.freeze({
+	enabled: true,
+	disabledRendererIds: Object.freeze([]),
+	maxSourceBytes: 262144,
+	maxPreviewHeight: 520,
+	htmlAllowScripts: false,
+	defaultToPreview: false
+});
+/**
+* Build a config from a partial user patch. Unknown keys are dropped so a
+* stale settings blob cannot smuggle behaviour in.
+*
+* @param {Partial<import('./contract.js').ViewerKitConfig> | null | undefined} patch
+* @returns {Required<import('./contract.js').ViewerKitConfig>}
+*/
+function resolveConfig(patch) {
+	/** @type {any} */
+	const out = {
+		...DEFAULT_CONFIG,
+		disabledRendererIds: []
+	};
+	if (patch == null || typeof patch !== "object") return out;
+	for (const key of Object.keys(DEFAULT_CONFIG)) {
+		const value = patch[key];
+		if (value === void 0) continue;
+		if (key === "disabledRendererIds") out[key] = Array.isArray(value) ? value.filter((id) => typeof id === "string") : [];
+		else if (typeof value === typeof DEFAULT_CONFIG[key]) out[key] = value;
+	}
+	return out;
+}
+/**
+* @param {{
+*   config?: Partial<import('./contract.js').ViewerKitConfig> | null,
+*   viewState?: ReturnType<typeof createViewState>,
+*   onError?: (error: unknown, context: { rendererId: string, requestId: string }) => void,
+* }} [options]
+*/
+function createKit(options = {}) {
+	const onError = options.onError ?? ((error) => {
+		console.error("[dsh-viewer-kit]", error);
+	});
+	let config = resolveConfig(options.config);
+	const viewState = options.viewState ?? createViewState();
+	/** @type {Map<string, import('./contract.js').Renderer>} */
+	const registry = /* @__PURE__ */ new Map();
+	/** @type {Set<() => void>} */
+	const listeners = /* @__PURE__ */ new Set();
+	/** @type {Map<string, string | null>} */
+	const negotiationCache = /* @__PURE__ */ new Map();
+	/** @type {{ surfaces: number, claimed: number, byRenderer: Record<string, number> }} */
+	const stats = {
+		surfaces: 0,
+		claimed: 0,
+		byRenderer: {}
+	};
+	function sorted() {
+		return [...registry.values()].sort((left, right) => (right.priority ?? 0) - (left.priority ?? 0) || (left.id < right.id ? -1 : 1));
+	}
+	function invalidate() {
+		negotiationCache.clear();
+		for (const listener of listeners) listener();
+	}
+	/**
+	* Content larger than the cap is not handed to a renderer at all. Declared
+	* as a closure rather than a method so `instantiate` works even when a
+	* caller destructures it off the Kit.
+	*
+	* @param {import('./contract.js').RenderRequest} request
+	* @returns {boolean}
+	*/
+	function withinLimits(request) {
+		return request.source.length <= config.maxSourceBytes;
+	}
+	return {
+		/**
+		* @param {import('./contract.js').Renderer} renderer
+		* @returns {() => void} disposer
+		*/
+		register(renderer) {
+			if (renderer == null || typeof renderer.id !== "string" || renderer.id === "") throw new TypeError("[dsh-viewer-kit] a renderer needs a non-empty string id");
+			if (typeof renderer.match !== "function" || typeof renderer.create !== "function") throw new TypeError(`[dsh-viewer-kit] renderer "${renderer.id}" needs match() and create()`);
+			if (registry.has(renderer.id)) throw new Error(`[dsh-viewer-kit] renderer "${renderer.id}" is already registered`);
+			registry.set(renderer.id, renderer);
+			invalidate();
+			return () => {
+				if (registry.delete(renderer.id)) invalidate();
+			};
+		},
+		renderers: () => Object.freeze([...sorted()]),
+		/**
+		* Pick the renderer that claims this request.
+		*
+		* The winner is the highest `priority`, then the lowest `id`. Sorting by
+		* id rather than by registration order keeps the outcome independent of
+		* the order DSH happens to load plugins in.
+		*
+		* @param {import('./contract.js').RenderRequest} request
+		* @returns {import('./contract.js').Renderer | null}
+		*/
+		negotiate(request) {
+			if (!config.enabled) return null;
+			if (config.disabledRendererIds.includes(request.lang)) return null;
+			const cached = negotiationCache.get(request.id);
+			if (cached !== void 0) return cached === null ? null : registry.get(cached) ?? null;
+			let winner = null;
+			for (const renderer of sorted()) {
+				if (config.disabledRendererIds.includes(renderer.id)) continue;
+				let claimed = false;
+				try {
+					claimed = renderer.match(request) === true;
+				} catch (error) {
+					onError(error, {
+						rendererId: renderer.id,
+						requestId: request.id
+					});
+					continue;
+				}
+				if (claimed) {
+					winner = renderer;
+					break;
+				}
+			}
+			negotiationCache.set(request.id, winner?.id ?? null);
+			return winner;
+		},
+		/**
+		* The view list a surface should offer: the renderer's own views plus the
+		* host's built-in `code` view, which always comes last.
+		*
+		* @param {import('./contract.js').RendererInstance} instance
+		* @returns {import('./contract.js').ViewDescriptor[]}
+		*/
+		viewsOf(instance) {
+			const filtered = (Array.isArray(instance.views) ? instance.views : []).filter((view) => view != null && typeof view.id === "string" && view.id !== CODE_VIEW.id);
+			return [...filtered, {
+				...CODE_VIEW,
+				label: filtered.length > 0 ? "code" : "source"
+			}];
+		},
+		getView: (id) => viewState.get(id),
+		setView: (id, viewId) => viewState.set(id, viewId),
+		/** The view a never-before-seen item should open in. */
+		defaultView() {
+			return config.defaultToPreview ? "preview" : CODE_VIEW.id;
+		},
+		/**
+		* Reject content too large to preview, before any renderer sees it.
+		*
+		* @param {import('./contract.js').RenderRequest} request
+		* @returns {boolean}
+		*/
+		withinLimits,
+		buildRequest: (input) => createRequest(input),
+		/**
+		* The `RenderHost` a renderer receives.
+		*
+		* `surface` binds the host to one concrete mounting point; without it
+		* (a headless test) the host is inert and any renderer that tries to
+		* mount will fail loudly rather than silently no-op.
+		*
+		* @param {import('./contract.js').RenderRequest} request
+		* @param {(error: unknown) => void} fail
+		* @param {{ document: Document, mount: (node: Node) => void, clearView: () => void }} [surface]
+		* @returns {import('./contract.js').RenderHost}
+		*/
+		hostFor(request, fail, surface) {
+			if (surface === void 0) throw new Error("[dsh-viewer-kit] createKit() needs a host binding to mount renderers");
+			return {
+				request,
+				document: surface.document,
+				mount: surface.mount,
+				clearView: surface.clearView,
+				limits: {
+					maxSourceBytes: config.maxSourceBytes,
+					maxPreviewHeight: config.maxPreviewHeight
+				},
+				fail,
+				config: () => config
+			};
+		},
+		/**
+		* Build an instance, converting any failure into `null` so the caller can
+		* fall back to the untouched native code block.
+		*
+		* @param {import('./contract.js').Renderer} renderer
+		* @param {import('./contract.js').RenderRequest} request
+		* @param {import('./contract.js').RenderHost} host
+		* @returns {import('./contract.js').RendererInstance | null}
+		*/
+		instantiate(renderer, request, host) {
+			if (!withinLimits(request)) return null;
+			try {
+				return renderer.create(host);
+			} catch (error) {
+				onError(error, {
+					rendererId: renderer.id,
+					requestId: request.id
+				});
+				return null;
+			}
+		},
+		/**
+		* Record one examined block. `rendererId` is absent when nothing claimed
+		* it, which is the common and completely healthy case.
+		*
+		* @param {string} [rendererId]
+		*/
+		noteSurface(rendererId) {
+			stats.surfaces += 1;
+			if (rendererId === void 0) return;
+			stats.claimed += 1;
+			stats.byRenderer[rendererId] = (stats.byRenderer[rendererId] ?? 0) + 1;
+		},
+		subscribe(listener) {
+			listeners.add(listener);
+			return () => {
+				listeners.delete(listener);
+			};
+		},
+		config: () => Object.freeze({
+			...config,
+			disabledRendererIds: Object.freeze([...config.disabledRendererIds])
+		}),
+		/**
+		* Replace the configuration and drop cached negotiation results, so a
+		* settings change takes effect without a reload.
+		*
+		* @param {Partial<import('./contract.js').ViewerKitConfig> | null | undefined} patch
+		*/
+		setConfig(patch) {
+			config = resolveConfig(patch);
+			invalidate();
+		},
+		stats: () => ({
+			surfaces: stats.surfaces,
+			claimed: stats.claimed,
+			byRenderer: { ...stats.byRenderer }
+		}),
+		/** Test seam: drop all renderers and cached state. */
+		_reset() {
+			registry.clear();
+			negotiationCache.clear();
+			stats.surfaces = 0;
+			stats.claimed = 0;
+			stats.byRenderer = {};
+		}
+	};
+}
+
+//#endregion
+//#region src/client/renderers/table.js
+/**
+* Data table renderer.
+*
+* This is the proof that the architecture's central claim holds: a second
+* renderer was added by writing one file in this directory and one line in
+* `index.js`. Nothing in `kit.js`, `dom-seam.js`, `code-block-surface.js` or
+* `contract.js` changed, and no new test fixture or DOM hook was needed.
+*
+* It claims three shapes, in this order of preference:
+*   1. a `csv` / `tsv` fence, parsed with a real RFC 4180 reader;
+*   2. a `json` fence that is an array of flat objects;
+*   3. a `markdown` fence that starts with a GitHub-style pipe table, since
+*      that is how people paste a table back out of a document.
+*
+* No dependency: the table is built from DOM calls, and the preview is a
+* plain table inside our own view root — nothing is sandboxed because nothing
+* here interprets markup.
+*
+* @module renderers/table
+*/
+/** Rows past this are truncated with a visible note rather than silently cut. */
+const MAX_ROWS = 500;
+/** Column ceilings, so one pathological cell cannot blow out the layout. */
+const MAX_COLUMNS = 40;
+const MAX_CELL_CHARS = 400;
+/**
+* RFC 4180 CSV/TSV reader: quoted fields, escaped quotes, embedded newlines,
+* and CRLF tolerance.
+*
+* @param {string} text
+* @param {string} delimiter
+* @returns {string[][]}
+*/
+function parseDelimited(text, delimiter) {
+	/** @type {string[][]} */
+	const rows = [];
+	/** @type {string[]} */
+	let row = [];
+	let field = "";
+	let quoted = false;
+	let index = 0;
+	const endField = () => {
+		row.push(field);
+		field = "";
+	};
+	const endRow = () => {
+		endField();
+		rows.push(row);
+		row = [];
+	};
+	while (index < text.length) {
+		const char = text[index];
+		if (quoted) {
+			if (char === "\"") {
+				if (text[index + 1] === "\"") {
+					field += "\"";
+					index += 2;
+					continue;
+				}
+				quoted = false;
+				index += 1;
+				continue;
+			}
+			field += char;
+			index += 1;
+			continue;
+		}
+		if (char === "\"" && field === "") {
+			quoted = true;
+			index += 1;
+			continue;
+		}
+		if (char === delimiter) {
+			endField();
+			index += 1;
+			continue;
+		}
+		if (char === "\r" && text[index + 1] === "\n") {
+			endRow();
+			index += 2;
+			continue;
+		}
+		if (char === "\n") {
+			endRow();
+			index += 1;
+			continue;
+		}
+		field += char;
+		index += 1;
+	}
+	if (field !== "" || row.length > 0) endRow();
+	return rows.filter((entry) => entry.length > 1 || entry[0] !== "");
+}
+/**
+* @param {string} text
+* @returns {{ header: string[], rows: string[][] } | null}
+*/
+function fromDelimited(text) {
+	const rows = parseDelimited(text, text.includes("	") && !text.includes(",") ? "	" : ",");
+	const header = rows.shift();
+	if (header === void 0 || rows.length === 0) return null;
+	return {
+		header,
+		rows
+	};
+}
+/**
+* @param {string} text
+* @returns {{ header: string[], rows: string[][] } | null}
+*/
+function fromJson(text) {
+	let parsed;
+	try {
+		parsed = JSON.parse(text);
+	} catch {
+		return null;
+	}
+	if (!Array.isArray(parsed) || parsed.length === 0) return null;
+	if (!parsed.every((entry) => entry !== null && typeof entry === "object" && !Array.isArray(entry))) return null;
+	const header = [];
+	for (const entry of parsed) for (const key of Object.keys(entry)) if (!header.includes(key)) header.push(key);
+	return {
+		header,
+		rows: parsed.map((entry) => header.map((key) => stringify(entry[key])))
+	};
+}
+/** @param {unknown} value */
+function stringify(value) {
+	if (value === null || value === void 0) return "";
+	if (typeof value === "string") return value;
+	if (typeof value === "number" || typeof value === "boolean") return String(value);
+	try {
+		return JSON.stringify(value) ?? "";
+	} catch {
+		return String(value);
+	}
+}
+/**
+* @param {string} text
+* @returns {{ header: string[], rows: string[][] } | null}
+*/
+function fromPipeTable(text) {
+	const lines = text.split("\n").map((line) => line.trim()).filter((line) => line !== "");
+	if (lines.length < 2) return null;
+	const split = (line) => line.replace(/^\||\|$/g, "").split("|").map((cell) => cell.trim());
+	const header = split(lines[0]);
+	if (!/^:?-{2,}:?$/.test(split(lines[1])[0] ?? "")) return null;
+	return {
+		header,
+		rows: lines.slice(2).map(split)
+	};
+}
+/**
+* Sniff the table, without committing to it. Kept separate from `match` so a
+* renderer can answer "do I recognise this?" cheaply and "is it worth
+* showing?" more carefully.
+*
+* @param {string} lang
+* @param {string} source
+* @returns {{ header: string[], rows: string[][] } | null}
+*/
+function readTable(lang, source) {
+	if (lang === "csv") return fromDelimited(source);
+	if (lang === "json") return fromJson(source);
+	if (lang === "markdown" || lang === "") return fromPipeTable(source);
+	return null;
+}
+/**
+* @param {(key: string, fallback: string) => string} t
+* @returns {import('../contract.js').Renderer}
+*/
+function createTableRenderer(t) {
+	return {
+		id: "table",
+		label: "Table",
+		priority: 5,
+		match(request) {
+			if (request.lang === "json") return readTable("json", request.source) !== null;
+			if (request.lang === "csv" || request.lang === "markdown" || request.lang === "") return readTable(request.lang, request.source) !== null;
+			return false;
+		},
+		create(host) {
+			const { request, document: doc, mount } = host;
+			const table = readTable(request.lang, request.source);
+			if (table === null) return null;
+			const columns = table.header.slice(0, MAX_COLUMNS);
+			const rows = table.rows.slice(0, MAX_ROWS);
+			const hiddenColumns = table.header.length - columns.length;
+			const hiddenRows = table.rows.length - rows.length;
+			return {
+				views: [{
+					id: "table",
+					label: t("view.table", "Table")
+				}],
+				enter(viewId) {
+					if (viewId === "code") return;
+					const root = doc.createElement("div");
+					root.className = "dvk-table-wrap";
+					const summary = doc.createElement("p");
+					summary.className = "dvk-table-summary";
+					summary.textContent = t("table.summary", "{rows} rows × {columns} columns").replace("{rows}", String(rows.length)).replace("{columns}", String(columns.length));
+					root.appendChild(summary);
+					const element = doc.createElement("table");
+					element.className = "dvk-table";
+					const thead = doc.createElement("thead");
+					const headRow = doc.createElement("tr");
+					for (const name of columns) {
+						const th = doc.createElement("th");
+						th.textContent = name.slice(0, MAX_CELL_CHARS);
+						headRow.appendChild(th);
+					}
+					thead.appendChild(headRow);
+					element.appendChild(thead);
+					const tbody = doc.createElement("tbody");
+					for (const row of rows) {
+						const tr = doc.createElement("tr");
+						for (let index = 0; index < columns.length; index += 1) {
+							const td = doc.createElement("td");
+							const value = row[index] ?? "";
+							td.textContent = value.length > MAX_CELL_CHARS ? `${value.slice(0, MAX_CELL_CHARS)}…` : value;
+							tr.appendChild(td);
+						}
+						tbody.appendChild(tr);
+					}
+					element.appendChild(tbody);
+					root.appendChild(element);
+					if (hiddenRows > 0 || hiddenColumns > 0) {
+						const note = doc.createElement("p");
+						note.className = "dvk-table-summary";
+						note.textContent = t("table.truncated", "Showing the first {rows} rows and {columns} columns").replace("{rows}", String(rows.length)).replace("{columns}", String(columns.length));
+						root.appendChild(note);
+					}
+					mount(root);
+				},
+				dispose() {}
+			};
+		}
+	};
+}
+
+//#endregion
+//#region src/client/locale.js
+/**
+* Copy for the kit.
+*
+* Registers with DSH's locale service when the host has one, and otherwise
+* falls back to a dictionary chosen from the document language. The kit must
+* keep working on a host that predates the locale service, so nothing here
+* throws.
+*
+* @module locale
+*/
+const NAMESPACE$1 = "dsh-viewer-kit";
+/** @type {Record<string, Record<string, string>>} */
+const DICTIONARIES = {
+	en: {
+		"switch.label": "Content view",
+		"view.code": "Code",
+		"view.preview": "Preview",
+		"view.table": "Table",
+		"html.frameTitle": "HTML preview",
+		"table.summary": "{rows} rows × {columns} columns",
+		"table.truncated": "Showing the first {rows} rows and {columns} columns"
+	},
+	zh: {
+		"switch.label": "内容视图",
+		"view.code": "代码",
+		"view.preview": "预览",
+		"view.table": "表格",
+		"html.frameTitle": "HTML 预览",
+		"table.summary": "{rows} 行 × {columns} 列",
+		"table.truncated": "仅显示前 {rows} 行、前 {columns} 列"
+	}
+};
+/**
+* Build the translator, and hand back its own disposer.
+*
+* The dictionary registration is owned HERE rather than parked on `ctx.effect`.
+* Two reasons, both learned the hard way:
+*
+*   - `ctx.effect`'s disposer belongs to the fiber, so a re-activation that
+*     retires the previous instance (HMR, re-enable) would leave the
+*     registration behind, and the next `register` would throw
+*     "namespace … already has locale …" — which fails the whole entry and
+*     takes the boot audit, and therefore DSH, down with it.
+*   - ownership is clearer: what this function registers, it unregisters.
+*
+* @param {{ get: (name: string) => unknown }} ctx
+* @returns {{ t: (key: string, fallback: string) => string, dispose: () => void }}
+*/
+function createTranslator(ctx) {
+	/**
+	* `locale.bind(ns)` returns the translate FUNCTION itself, not an object
+	* carrying one — `const t = locale.bind(NS); t('key')`. Calling
+	* `bound.t(key)` threw inside the seam, where the per-block try/catch turned
+	* it into a silent "no renderer claimed this".
+	*
+	* @type {((key: string) => string) | null}
+	*/
+	let bound = null;
+	/** @type {(() => void) | null} */
+	let unregister = null;
+	/** @type {any} */
+	const locale = ctx.get("locale");
+	if (locale != null && typeof locale.register === "function" && typeof locale.bind === "function") {
+		try {
+			unregister = locale.register(NAMESPACE$1, DICTIONARIES);
+		} catch {}
+		const translate = locale.bind(NAMESPACE$1);
+		if (typeof translate === "function") bound = translate;
+	}
+	/**
+	* @param {string} lang
+	* @returns {Record<string, string>}
+	*/
+	function dictionaryFor(lang) {
+		const primary = String(lang ?? "").toLowerCase().split(/[-_]/)[0];
+		return DICTIONARIES[primary] ?? DICTIONARIES.en;
+	}
+	return {
+		t(key, fallback) {
+			if (bound !== null) {
+				const value = bound(key);
+				if (typeof value === "string" && value !== "" && value !== key) return value;
+			}
+			return dictionaryFor(globalThis.document?.documentElement?.lang ?? "en")[key] ?? fallback;
+		},
+		dispose() {
+			try {
+				unregister?.();
+			} catch {}
+			unregister = null;
+			bound = null;
+		}
+	};
+}
+
+//#endregion
+//#region src/client/styles.js
+/**
+* The kit's stylesheet.
+*
+* Every colour and radius is a `--dsw-*` design token so the plugin follows the
+* host's light/dark theme without knowing anything about it. The two rules
+* that implement the view switch are the whole mechanism:
+*
+*   - `data-dvk-mode="code"`   → our view root is display:none, native shows
+*   - `data-dvk-mode="preview"`→ the native child is display:none, ours shows
+*
+* Hiding rather than removing is what keeps switching back to code lossless
+* (docs/01-architecture.md §6.4, invariant 2 and 4).
+*
+* @module styles
+*/
+/** Marks our own `<style>` element, for re-apply and cleanup. */
+const STYLE_MARKER = "dsh-viewer-kit";
+/**
+* Install the stylesheet into a document and return its remover.
+*
+* This injects the element itself rather than reaching for a host `styles`
+* helper. The client module contract is `factory(require) → exports`, so the
+* only things a plugin may rely on are `require`, the browser globals, and the
+* `ctx` accessors documented for `apply`. Injecting a `<style>` is exactly what
+* the shipped UI packages do, and it keeps the cleanup guarantee ours.
+*
+* @param {Document} doc
+* @returns {() => void} remover
+*/
+function installStyles(doc) {
+	for (const stale of doc.querySelectorAll(`style[data-plugin="${STYLE_MARKER}"]`)) stale.remove();
+	const tag = doc.createElement("style");
+	tag.setAttribute("data-plugin", STYLE_MARKER);
+	tag.setAttribute("data-plugin-css", `${STYLE_MARKER}/styles`);
+	tag.textContent = STYLES;
+	doc.head.appendChild(tag);
+	return () => {
+		tag.remove();
+	};
+}
+/** @type {string} */
+const STYLES = `
+.dvk-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 6px;
+  padding: 2px;
+  border-radius: var(--dsw-radius-sm, 6px);
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.12));
+}
+.dvk-switch__item {
+  appearance: none;
+  border: 0;
+  margin: 0;
+  padding: 0 8px;
+  height: 20px;
+  border-radius: calc(var(--dsw-radius-sm, 6px) - 2px);
+  font: 11px/18px var(--dsw-font-family, system-ui, sans-serif);
+  color: var(--dsw-alias-label-tertiary, #888);
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.dvk-switch__item:hover {
+  color: var(--dsw-alias-label-secondary, #666);
+}
+.dvk-switch__item[aria-pressed="true"] {
+  color: var(--dsw-alias-label-primary, #111);
+  background: var(--dsw-alias-bg-base, #fff);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+.dvk-switch__item:focus-visible {
+  outline: 1px solid var(--dsw-alias-state-business-primary, #4a7dff);
+  outline-offset: 1px;
+}
+
+.dvk-view {
+  padding: 6px 22px 20px;
+}
+.dvk-frame {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  border: 0;
+  border-radius: var(--dsw-radius-sm, 6px);
+  background: var(--dsw-alias-bg-base, #fff);
+}
+
+[data-dvk-mode="code"] > .dvk-view {
+  display: none;
+}
+[data-dvk-mode="preview"] > *:not(.dvk-view) {
+  display: none;
+}
+[data-dvk-mode="preview"] > .dvk-view {
+  display: block;
+}
+/* Last, so it wins the tie with the rule above: a view root with nothing in
+   it must not reserve a line of layout. */
+.dvk-view:empty {
+  display: none;
+}
+
+/* Data table view. Rendered from DOM calls, so it inherits the host font and
+   needs no sandbox; the caps that keep a pathological payload from stretching
+   the conversation live in renderers/table.js, not here. */
+.dvk-table-summary {
+  margin: 0 0 8px;
+  color: var(--dsw-alias-label-tertiary, #888);
+  font: 11px/18px var(--dsw-font-family, system-ui, sans-serif);
+}
+.dvk-table-wrap {
+  max-height: inherit;
+  overflow: auto;
+}
+.dvk-table {
+  border-collapse: collapse;
+  width: 100%;
+  font: var(--dsw-font-markdown-code-block-small, 12px/18px var(--dsw-font-family, monospace));
+  font-variant-numeric: tabular-nums;
+}
+.dvk-table th,
+.dvk-table td {
+  border: 1px solid var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.24));
+  padding: 4px 10px;
+  text-align: start;
+  white-space: nowrap;
+  max-width: 32ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dvk-table th {
+  position: sticky;
+  top: 0;
+  background: var(--dsw-alias-bg-layer-1, #f5f5f5);
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary, #111);
+}
+.dvk-table tbody tr:nth-child(even) {
+  background: color-mix(in srgb, var(--dsw-alias-interactive-bg-hover, #8881) 40%, transparent);
+}
+`;
+
+//#endregion
+//#region src/client/index.js
+/**
+* dsh-viewer-kit — client half.
+*
+* Activation order, and why it is this order:
+*   1. the Kit, so the seam can negotiate against a populated registry;
+*   2. renderers, registered before the seam ever runs;
+*   3. styles, so a block discovered in the very first scan is never unstyled;
+*   4. the seam, which scans immediately and then observes.
+*
+* ## What this module is allowed to touch
+*
+* The client module contract is `factory(require) → exports`
+* (`dsh-client-modules/lib/client.js`), so a plugin may rely on exactly three
+* things: `require`, the browser globals, and the `ctx` members documented for
+* `apply`. That list is short on purpose:
+*
+*   - `ctx.get(name)`  — the sanctioned accessor; **`ctx.anythingElse` throws**
+*   - `ctx.effect(fn)` — `fn` performs setup and **returns** the disposer
+*
+* Both mistakes have already cost this plugin a renderer-side boot crash: an
+* undocumented `ctx.MutationObserver` read threw, and passing a finished
+* disposer to `ctx.effect` tore the plugin down the instant it activated.
+* `tests/repro-activation.mjs` runs the built bundle against a strict context
+* that reproduces both, and `pnpm test` runs it.
+*
+* @module client
+*/
+const NAMESPACE = "dsh-viewer-kit";
+const VERSION = "0.3.1";
+/**
+* Handle to the live activation, so a second `apply` can retire the first.
+* See the guard inside `apply`.
+*/
+const LIVE_HANDLE = "__DSH_VIEWER_KIT_DISPOSE__";
+/**
+* Every renderer the kit ships with, in one place.
+*
+* Adding a renderer is exactly this: a new factory in `renderers/`, and one
+* more line here. Nothing else in the package changes — that is the whole
+* point of the layering in docs/01-architecture.md §4.
+*/
+const RENDERER_FACTORIES = [createHtmlRenderer, createTableRenderer];
+/**
+* Hard dependencies. The kit needs none of the host services: it is pure DOM
+* plus the two `ctx` members above. `locale` is used opportunistically when
+* the host has one.
+*/
+const inject = [];
+/**
+* Set at bundle-evaluation time, before anything can call `apply`.
+*
+* DSH's client module system is lazy: evaluating this file registers a factory,
+* and `apply` may never be invoked. Without this marker two very different
+* failures look identical from the console — `__DSH_VIEWER_KIT__` undefined
+* either way.
+*
+*   marker absent,  hook absent  → the bundle never reached the web boot graph
+*   marker present, hook absent  → the bundle ran but `apply` threw (this is
+*                                  what makes the boot audit fail and crash DSH)
+*   both present                 → live; `diagnose()` says why nothing rendered
+*/
+globalThis.__DSH_VIEWER_KIT_BOOTED__ = VERSION;
+/**
+* @param {{ get: (name: string) => unknown, effect: (callback: () => unknown, label?: string) => unknown }} ctx
+* @returns {() => void} disposer
+*/
+function apply(ctx) {
+	const doc = globalThis.document;
+	const log = globalThis.console;
+	if (doc?.body == null) return () => {};
+	const previous = globalThis[LIVE_HANDLE];
+	if (typeof previous === "function") {
+		log.log(`[${NAMESPACE}] retiring the previous activation first`);
+		try {
+			previous();
+		} catch (error) {
+			log.error(`[${NAMESPACE}] the previous activation did not retire cleanly`, error);
+		}
+	}
+	const translator = createTranslator(ctx);
+	const t = translator.t;
+	/** @type {(() => void)[]} */
+	const teardown = [];
+	let disposed = false;
+	const kit = createKit({ onError: (error, context) => {
+		log.error(`[${NAMESPACE}] ${context.rendererId} failed on ${context.requestId}`, error);
+	} });
+	teardown.push(...RENDERER_FACTORIES.map((factory) => kit.register(factory(t))));
+	log.log(`[${NAMESPACE}] renderers: ${kit.renderers().map((renderer) => renderer.id).join(", ")}`);
+	teardown.push(installStyles(doc));
+	teardown.push(translator.dispose);
+	const seam = createDomSeam({
+		kit,
+		t,
+		document: doc,
+		root: doc.body,
+		MutationObserver: globalThis.MutationObserver
+	});
+	seam.scan();
+	teardown.push(() => seam.dispose());
+	globalThis.__DSH_VIEWER_KIT__ = {
+		version: VERSION,
+		kit,
+		seam,
+		stats: () => ({
+			...kit.stats(),
+			live: seam.size()
+		}),
+		diagnose: () => ({
+			version: VERSION,
+			renderers: kit.renderers().map((r) => r.id),
+			...seam.diagnose()
+		})
+	};
+	teardown.push(() => {
+		delete globalThis.__DSH_VIEWER_KIT__;
+	});
+	log.log(`[${NAMESPACE}] v${VERSION} active — ${seam.size()} code block(s) enhanced`);
+	const dispose = () => {
+		if (disposed) return;
+		disposed = true;
+		for (const step of teardown.reverse()) try {
+			step();
+		} catch (error) {
+			log.error(`[${NAMESPACE}] cleanup step failed`, error);
+		}
+		if (globalThis[LIVE_HANDLE] === dispose) delete globalThis[LIVE_HANDLE];
+	};
+	globalThis[LIVE_HANDLE] = dispose;
+	ctx.effect(() => dispose, `${NAMESPACE}: dispose`);
+	return dispose;
+}
+
+//#endregion
+exports.apply = apply;
+exports.inject = inject;
+  return module.exports;
+}
+});

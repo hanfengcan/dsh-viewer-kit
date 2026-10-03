@@ -1,0 +1,262 @@
+/**
+ * Data table renderer.
+ *
+ * This is the proof that the architecture's central claim holds: a second
+ * renderer was added by writing one file in this directory and one line in
+ * `index.js`. Nothing in `kit.js`, `dom-seam.js`, `code-block-surface.js` or
+ * `contract.js` changed, and no new test fixture or DOM hook was needed.
+ *
+ * It claims three shapes, in this order of preference:
+ *   1. a `csv` / `tsv` fence, parsed with a real RFC 4180 reader;
+ *   2. a `json` fence that is an array of flat objects;
+ *   3. a `markdown` fence that starts with a GitHub-style pipe table, since
+ *      that is how people paste a table back out of a document.
+ *
+ * No dependency: the table is built from DOM calls, and the preview is a
+ * plain table inside our own view root — nothing is sandboxed because nothing
+ * here interprets markup.
+ *
+ * @module renderers/table
+ */
+
+/** Rows past this are truncated with a visible note rather than silently cut. */
+const MAX_ROWS = 500
+
+/** Column ceilings, so one pathological cell cannot blow out the layout. */
+const MAX_COLUMNS = 40
+const MAX_CELL_CHARS = 400
+
+/**
+ * RFC 4180 CSV/TSV reader: quoted fields, escaped quotes, embedded newlines,
+ * and CRLF tolerance.
+ *
+ * @param {string} text
+ * @param {string} delimiter
+ * @returns {string[][]}
+ */
+export function parseDelimited(text, delimiter) {
+  /** @type {string[][]} */
+  const rows = []
+  /** @type {string[]} */
+  let row = []
+  let field = ''
+  let quoted = false
+  let index = 0
+
+  const endField = () => {
+    row.push(field)
+    field = ''
+  }
+  const endRow = () => {
+    endField()
+    rows.push(row)
+    row = []
+  }
+
+  while (index < text.length) {
+    const char = text[index]
+    if (quoted) {
+      if (char === '"') {
+        if (text[index + 1] === '"') {
+          field += '"'
+          index += 2
+          continue
+        }
+        quoted = false
+        index += 1
+        continue
+      }
+      field += char
+      index += 1
+      continue
+    }
+    if (char === '"' && field === '') {
+      quoted = true
+      index += 1
+      continue
+    }
+    if (char === delimiter) {
+      endField()
+      index += 1
+      continue
+    }
+    if (char === '\r' && text[index + 1] === '\n') {
+      endRow()
+      index += 2
+      continue
+    }
+    if (char === '\n') {
+      endRow()
+      index += 1
+      continue
+    }
+    field += char
+    index += 1
+  }
+  if (field !== '' || row.length > 0) endRow()
+
+  return rows.filter((entry) => entry.length > 1 || entry[0] !== '')
+}
+
+/**
+ * @param {string} text
+ * @returns {{ header: string[], rows: string[][] } | null}
+ */
+function fromDelimited(text) {
+  const delimiter = text.includes('\t') && !text.includes(',') ? '\t' : ','
+  const rows = parseDelimited(text, delimiter)
+  const header = rows.shift()
+  if (header === undefined || rows.length === 0) return null
+  return { header, rows }
+}
+
+/**
+ * @param {string} text
+ * @returns {{ header: string[], rows: string[][] } | null}
+ */
+function fromJson(text) {
+  let parsed
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return null
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return null
+  if (!parsed.every((entry) => entry !== null && typeof entry === 'object' && !Array.isArray(entry))) return null
+  const header = []
+  for (const entry of parsed) {
+    for (const key of Object.keys(entry)) if (!header.includes(key)) header.push(key)
+  }
+  const rows = parsed.map((entry) => header.map((key) => stringify(entry[key])))
+  return { header, rows }
+}
+
+/** @param {unknown} value */
+function stringify(value) {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  try {
+    return JSON.stringify(value) ?? ''
+  } catch {
+    return String(value)
+  }
+}
+
+/**
+ * @param {string} text
+ * @returns {{ header: string[], rows: string[][] } | null}
+ */
+function fromPipeTable(text) {
+  const lines = text.split('\n').map((line) => line.trim()).filter((line) => line !== '')
+  if (lines.length < 2) return null
+  const split = (line) => line.replace(/^\||\|$/g, '').split('|').map((cell) => cell.trim())
+  const header = split(lines[0])
+  if (!/^:?-{2,}:?$/.test(split(lines[1])[0] ?? '')) return null
+  return { header, rows: lines.slice(2).map(split) }
+}
+
+/**
+ * Sniff the table, without committing to it. Kept separate from `match` so a
+ * renderer can answer "do I recognise this?" cheaply and "is it worth
+ * showing?" more carefully.
+ *
+ * @param {string} lang
+ * @param {string} source
+ * @returns {{ header: string[], rows: string[][] } | null}
+ */
+export function readTable(lang, source) {
+  if (lang === 'csv') return fromDelimited(source)
+  if (lang === 'json') return fromJson(source)
+  if (lang === 'markdown' || lang === '') return fromPipeTable(source)
+  return null
+}
+
+/**
+ * @param {(key: string, fallback: string) => string} t
+ * @returns {import('../contract.js').Renderer}
+ */
+export function createTableRenderer(t) {
+  return {
+    id: 'table',
+    label: 'Table',
+    priority: 5,
+
+    match(request) {
+      if (request.lang === 'json') return readTable('json', request.source) !== null
+      if (request.lang === 'csv' || request.lang === 'markdown' || request.lang === '') {
+        return readTable(request.lang, request.source) !== null
+      }
+      return false
+    },
+
+    create(host) {
+      const { request, document: doc, mount } = host
+      const table = readTable(request.lang, request.source)
+      if (table === null) return null
+
+      const columns = table.header.slice(0, MAX_COLUMNS)
+      const rows = table.rows.slice(0, MAX_ROWS)
+      const hiddenColumns = table.header.length - columns.length
+      const hiddenRows = table.rows.length - rows.length
+
+      return {
+        views: [{ id: 'table', label: t('view.table', 'Table') }],
+
+        enter(viewId) {
+          if (viewId === 'code') return
+
+          const root = doc.createElement('div')
+          root.className = 'dvk-table-wrap'
+
+          const summary = doc.createElement('p')
+          summary.className = 'dvk-table-summary'
+          summary.textContent = t('table.summary', '{rows} rows × {columns} columns')
+            .replace('{rows}', String(rows.length))
+            .replace('{columns}', String(columns.length))
+          root.appendChild(summary)
+
+          const element = doc.createElement('table')
+          element.className = 'dvk-table'
+
+          const thead = doc.createElement('thead')
+          const headRow = doc.createElement('tr')
+          for (const name of columns) {
+            const th = doc.createElement('th')
+            th.textContent = name.slice(0, MAX_CELL_CHARS)
+            headRow.appendChild(th)
+          }
+          thead.appendChild(headRow)
+          element.appendChild(thead)
+
+          const tbody = doc.createElement('tbody')
+          for (const row of rows) {
+            const tr = doc.createElement('tr')
+            for (let index = 0; index < columns.length; index += 1) {
+              const td = doc.createElement('td')
+              const value = row[index] ?? ''
+              td.textContent = value.length > MAX_CELL_CHARS ? `${value.slice(0, MAX_CELL_CHARS)}…` : value
+              tr.appendChild(td)
+            }
+            tbody.appendChild(tr)
+          }
+          element.appendChild(tbody)
+          root.appendChild(element)
+
+          if (hiddenRows > 0 || hiddenColumns > 0) {
+            const note = doc.createElement('p')
+            note.className = 'dvk-table-summary'
+            note.textContent = t('table.truncated', 'Showing the first {rows} rows and {columns} columns')
+              .replace('{rows}', String(rows.length))
+              .replace('{columns}', String(columns.length))
+            root.appendChild(note)
+          }
+
+          mount(root)
+        },
+
+        dispose() {},
+      }
+    },
+  }
+}
