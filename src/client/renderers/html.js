@@ -112,26 +112,6 @@ export function estimateHeight(source, cap) {
 }
 
 /**
- * Encode a document for safe transport inside a `<script>` in another srcdoc.
- *
- * Base64 rather than a quoted JSON string: the model's HTML can contain
- * `</script>`, and the HTML parser ends the script element on that text even
- * when it sits inside a JavaScript string literal. Base64's alphabet
- * (`A-Za-z0-9+/=`) cannot terminate anything, so this needs no escaping rules
- * to be right — and "needs no escaping rules" is the only kind of injection
- * defence worth having here.
- *
- * @param {string} text
- * @returns {string}
- */
-function toBase64(text) {
-  const bytes = new TextEncoder().encode(text)
-  let binary = ''
-  for (const byte of bytes) binary += String.fromCharCode(byte)
-  return btoa(binary)
-}
-
-/**
  * Height the frame keeps until a measurement arrives.
  *
  * Exported so `tests/run.mjs` can wait exactly this long and assert the
@@ -140,74 +120,83 @@ function toBase64(text) {
 export const MEASURE_TIMEOUT_MS = 600
 
 /**
- * Build the two-frame document that measures its own content.
+ * Build the document that reports its own rendered height.
  *
- * ## Why two frames
+ * ## Why the measuring script lives INSIDE the document
  *
  * An `<iframe>` is a replaced element: its height never derives from the
  * document inside it, so `max-height` alone only ever limits the 150px default
- * and a "short content shows fully, long content scrolls" frame cannot be
- * expressed in CSS at all. The height has to be measured, and measuring needs
- * script access to the inner document.
+ * and "short content shows fully, long content scrolls" cannot be expressed in
+ * CSS at all. The height has to be measured.
  *
- * The two sandbox attributes are what make that safe, and they only work
- * together:
+ * The first attempt at this used two nested frames — an outer one to run the
+ * measuring script and an inner one holding the model's document, with
+ * `allow-same-origin` on the inner so the outer could read it. **That cannot
+ * work, and the reason is a spec rule rather than a bug:** sandbox flags are
+ * inherited by nested browsing contexts and UNIONED with the frame's own. An
+ * outer frame without `allow-same-origin` therefore forces the sandboxed-origin
+ * flag onto every descendant, and an opaque origin is never same-origin with
+ * anything — not even with the frame that created it. The inner document got
+ * its own fresh opaque origin, `contentDocument` was `null`, the measuring
+ * script returned at its first guard, and the inner frame stayed at the
+ * `height: 0` the stylesheet gave it. The content was in the DOM and invisible.
  *
- *   - the OUTER frame has `allow-scripts` and NOT `allow-same-origin`, so its
- *     origin is opaque — it runs our measuring code but can reach nothing of
- *     the host's;
- *   - the INNER frame has `allow-same-origin` and NOT `allow-scripts`, so it
- *     inherits the outer's opaque origin (making it readable by the measuring
- *     script) while the MODEL'S OWN SCRIPTS STAY BLOCKED BY THE SANDBOX — not
- *     by a policy that could be argued with.
+ * Measuring in-place removes the cross-origin problem entirely: the script
+ * measures the document it is part of.
  *
- * The net isolation is the same as the single `sandbox=""` frame it replaces:
- * no host DOM, no host storage, no credentialed requests. What it adds is a
- * number.
+ * ## What keeps the model's scripts out
  *
- * @param {string} source
- * @param {string} frameId
- * @param {number} initialHeight
+ * The frame still has `sandbox="allow-scripts"` and NOT `allow-same-origin`, so
+ * the origin is opaque: no host DOM, no host storage, no credentialed requests,
+ * whatever runs inside. On top of that, a Content-Security-Policy meta with a
+ * per-render nonce blocks every inline script and event handler that does not
+ * carry it, so the model's own scripts do not run at all. The model cannot relax
+ * this: a later policy can only tighten an earlier one, and the meta is parsed
+ * before any of the model's markup.
+ *
+ * The two layers are deliberately independent. If the policy were ever ignored,
+ * the opaque origin still bounds the damage; if the origin were ever weakened,
+ * the policy still stops the scripts.
+ *
+ * @param {string} source the model's document
+ * @param {string} frameId echoed back so a surface can ignore other frames
+ * @param {string} nonce authorises the measuring script and nothing else
+ * @param {boolean} allowScripts when true, omit the policy and let the model's
+ *   own scripts run — still inside the opaque origin
  * @returns {string}
  */
-function buildMeasuringDocument(source, frameId, initialHeight) {
-  const payload = toBase64(source)
-  return `<!doctype html><meta charset="utf-8">
-<style>
-  html,body{margin:0;padding:0;overflow:hidden;background:transparent}
-  iframe{display:block;width:100%;border:0;height:0}
-</style>
-<iframe id="dvk-inner" sandbox="allow-same-origin"></iframe>
-<script>
+export function buildMeasuredDocument(source, frameId, nonce, allowScripts) {
+  const policy = allowScripts
+    ? ''
+    : `<meta http-equiv="Content-Security-Policy" content="script-src 'nonce-${nonce}'">`
+  return `<!doctype html><meta charset="utf-8">${policy}
+${source}
+<script nonce="${nonce}">
 (function () {
-  var inner = document.getElementById('dvk-inner');
   var last = -1;
   function measure() {
-    var doc;
-    try { doc = inner.contentDocument } catch (e) { return }
-    if (!doc || !doc.documentElement) return;
-    // scrollHeight is the CONTENT's height and does not depend on the frame's
-    // own viewport, which is what lets the frame be sized from it without a
-    // feedback loop. The inner stays at height 0 until a number is known.
-    var h = Math.max(doc.documentElement.scrollHeight, doc.body ? doc.body.scrollHeight : 0);
+    var body = document.body;
+    // The BODY's own box, not documentElement.scrollHeight. scrollHeight on the
+    // root element is max(content, viewport), so a frame that is currently
+    // taller than its content — which is exactly the state before the first
+    // measurement — would report its own height back and never shrink. The
+    // body's rect is the content's height regardless of the viewport.
+    var h = 0;
+    if (body) {
+      var rect = body.getBoundingClientRect();
+      var style = getComputedStyle(body);
+      h = Math.ceil(rect.bottom + (parseFloat(style.marginBottom) || 0) + window.scrollY);
+    }
+    if (!h) h = document.documentElement.scrollHeight;
     if (!h || h === last) return;
     last = h;
-    inner.style.height = h + 'px';
     try { parent.postMessage({ __dvk: 'height', id: ${JSON.stringify(frameId)}, height: h }, '*') } catch (e) {}
   }
-  inner.addEventListener('load', function () {
-    measure();
-    // Images and webfonts land after the load event and change the height; a
-    // couple of follow-ups catch them without polling forever.
-    setTimeout(measure, 60);
-    setTimeout(measure, 300);
-    try { new ResizeObserver(measure).observe(inner.contentDocument.documentElement) } catch (e) {}
-  });
-  var bytes = atob(${JSON.stringify(payload)});
-  var buf = new Uint8Array(bytes.length);
-  for (var i = 0; i < bytes.length; i++) buf[i] = bytes.charCodeAt(i);
-  inner.srcdoc = new TextDecoder().decode(buf);
-  document.documentElement.style.height = ${JSON.stringify(String(initialHeight))} + 'px';
+  measure();
+  // Images and webfonts land after the load event and change the height; a
+  // couple of follow-ups catch them without polling forever.
+  addEventListener('load', function () { measure(); setTimeout(measure, 60); setTimeout(measure, 300) });
+  try { new ResizeObserver(measure).observe(document.body || document.documentElement) } catch (e) {}
 })();
 </` + `script>`
 }
@@ -239,6 +228,15 @@ export function createHtmlRenderer(t) {
       let frame = null
       /** Identifies this frame's measurement messages; only ever compared. */
       const frameId = `dvk-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`
+      /**
+       * Authorises the measuring script and nothing else.
+       *
+       * The model's markup is fixed before this is generated, so it cannot know
+       * the value; a CSP nonce only has to be unguessable, not secret from the
+       * browser. `crypto.randomUUID` needs a secure context, which `dsh-app://`
+       * is registered as, hence the fallback.
+       */
+      const nonce = globalThis.crypto?.randomUUID?.() ?? `${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`
       /**
        * The frame's current height, so a late measurement can be ignored once
        * the surface is gone and so the fallback can be told from a real result.
@@ -282,20 +280,22 @@ export function createHtmlRenderer(t) {
         const initial = mode === 'fixed' ? limits.maxPreviewHeight : estimated
 
         if (mode === 'measure') {
-          // `allow-scripts` here is for the MEASURING script only; the model's
-          // document lives in an inner frame that has no `allow-scripts`, so its
-          // own scripts stay blocked by the sandbox. `allow-same-origin` is
-          // deliberately absent from this frame — that is what keeps the inner
-          // document's origin opaque and therefore unable to reach the host.
+          // `allow-scripts` is needed because the measuring script IS the
+          // document — it reports its own content height, which is what removes
+          // the cross-origin problem the two-frame version could not solve.
+          // `allow-same-origin` is deliberately absent: the opaque origin is
+          // what bounds anything the model's markup could do, and the nonce
+          // policy below is what stops its scripts from running at all.
           frame.setAttribute('sandbox', 'allow-scripts')
           // Start at the estimate so the frame is never a zero-height sliver
-          // while the measurement is in flight.
+          // while the measurement is in flight, and so a measurement that never
+          // arrives leaves a sane height rather than a blank strip.
           frame.style.height = `${initial}px`
-          frame.srcdoc = buildMeasuringDocument(request.source, frameId, initial)
+          frame.srcdoc = buildMeasuredDocument(request.source, frameId, nonce, config.htmlAllowScripts)
           view.addEventListener?.('message', onMessage)
         } else {
-          // No measuring frame, so no script permission is needed at all: the
-          // single frame keeps the same `sandbox=""` it always had, and
+          // No measuring script, so no script permission is needed at all: the
+          // frame keeps the same `sandbox=""` it always had, and
           // `htmlAllowScripts` is the only thing that can widen it for the
           // model's own scripts.
           frame.setAttribute('sandbox', config.htmlAllowScripts ? 'allow-scripts' : '')

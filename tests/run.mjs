@@ -326,16 +326,13 @@ await test('the preview mounts a frame and hides the source', () => {
   eq(f.parentNode, ourRoot(env.document), 'mounted inside our own root')
   eq(f.getAttribute('referrerpolicy'), 'no-referrer', 'no referrer leakage')
 
-  // The default mode MEASURES, which needs a script in the outer frame — a real
-  // change from the original `sandbox=""`, and the reason the two-frame layout
-  // exists: the model's document sits in an inner frame with no `allow-scripts`,
-  // so its own scripts stay blocked by the sandbox rather than by a policy.
-  // `previewHeightMode: 'fit'` keeps the single, capability-free frame.
-  eq(f.getAttribute('sandbox'), 'allow-scripts', 'the outer frame hosts the measuring script')
-  assert(
-    /<iframe id="dvk-inner" sandbox="allow-same-origin">/.test(f.srcdoc),
-    'the model document is in a frame that may be READ but may not run its own scripts',
-  )
+  // The default mode MEASURES, so the frame carries a script: the measuring
+  // script is part of the document it measures, which is what makes the height
+  // exact without any cross-origin read. The opaque origin bounds what the
+  // model's markup could do, and the nonce policy stops its scripts running at
+  // all. `previewHeightMode: 'fit'` keeps the single, capability-free frame.
+  eq(f.getAttribute('sandbox'), 'allow-scripts', 'the measuring script needs to run')
+  assert(!f.getAttribute('sandbox').includes('allow-same-origin'), 'but never the host origin')
 })
 
 await test('a no-script preview mode keeps the original capability-free frame', () => {
@@ -1153,21 +1150,16 @@ await test('the conversation boundary accepts any of the chat containers', () =>
 })
 
 await test('the measured height wins over the estimate, and is capped', () => {
-  // The whole point of the measuring frame: the frame follows the document's
-  // real height instead of a guess, so short content shows fully and only
-  // genuinely long content scrolls.
+  // The whole point of measuring: the frame follows the document's real height
+  // instead of a guess, so short content shows fully and only genuinely long
+  // content scrolls.
   const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p>hi</p>' }) }])
   const { env } = mount(html, { config: { maxPreviewHeight: 320 } })
   const frame = env.document.querySelector('iframe')
   const view = env.document.defaultView
 
-  eq(frame.getAttribute('sandbox'), 'allow-scripts', 'the outer frame runs only our measuring script')
-  assert(frame.srcdoc.includes('allow-same-origin'), 'the inner frame is the one that may be read')
-  assert(
-    /<iframe id="dvk-inner" sandbox="allow-same-origin">/.test(frame.srcdoc),
-    'and the inner frame has NO allow-scripts, so the model\'s scripts stay blocked by the sandbox',
-  )
-  assert(!/sandbox="allow-scripts allow-same-origin"/.test(frame.srcdoc), 'never both together')
+  eq(frame.getAttribute('sandbox'), 'allow-scripts', 'the measuring script IS the document, so it needs to run')
+  assert(!frame.getAttribute('sandbox').includes('allow-same-origin'), 'but the origin stays opaque')
 
   // It starts at the estimate so it is never a zero-height sliver.
   assert(frame.style.height !== '0px' && frame.style.height.endsWith('px'), `starts sized, got ${frame.style.height}`)
@@ -1179,6 +1171,77 @@ await test('the measured height wins over the estimate, and is capped', () => {
   // Capped, because a preview is a glance rather than a page view.
   view.postMessage({ source: frame.contentWindow, data: { __dvk: 'height', id: frameIdOf(frame.srcdoc), height: 9000 } })
   eq(frame.style.height, '320px', 'a very tall document stops at the cap')
+})
+
+await test('the model document is the frame document, not a nested one', () => {
+  // The first implementation nested the model's document in a second frame and
+  // tried to read it from the outer one. That cannot work: sandbox flags are
+  // inherited and unioned, so an outer frame without `allow-same-origin` forces
+  // an opaque origin onto every descendant, and opaque origins are never
+  // same-origin with anything — not even their own parent. `contentDocument`
+  // was null, the inner frame stayed at `height: 0`, and the preview was blank.
+  //
+  // Measuring in place is what removes the cross-origin problem: the script
+  // measures the document it is part of. This test pins that shape, because
+  // reintroducing a nested frame would blank the preview again.
+  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p id="marker">hi</p>' }) }])
+  const frame = mount(html, { config: { maxPreviewHeight: 320 } }).env.document.querySelector('iframe')
+
+  assert(frame.srcdoc.includes('id="marker"'), 'the model\'s markup is IN this document')
+  eq(/<iframe/.test(frame.srcdoc), false, 'and there is no nested frame to read across')
+  assert(!frame.srcdoc.includes('contentDocument'), 'nothing reaches across a browsing context')
+})
+
+await test('a nonce policy blocks the model scripts while letting the measurer run', () => {
+  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p>hi</p>' }) }])
+  const frame = mount(html, { config: { maxPreviewHeight: 320 } }).env.document.querySelector('iframe')
+  const srcdoc = frame.srcdoc
+
+  const policy = /<meta http-equiv="Content-Security-Policy" content="script-src 'nonce-([^']+)'">/.exec(srcdoc)
+  assert(policy !== null, 'a nonce policy is present')
+  const nonce = policy[1]
+  // Every script in the document must carry that nonce; anything without it —
+  // which is every script the model could write — is refused, along with inline
+  // event handlers and `javascript:` URLs, since 'unsafe-inline' is absent.
+  const tags = [...srcdoc.matchAll(/<script([^>]*)>/g)].map((m) => m[1])
+  eq(tags.length, 1, 'exactly one script, the measurer')
+  assert(tags[0].includes(`nonce="${nonce}"`), 'and it carries the nonce')
+  assert(!srcdoc.includes('unsafe-inline'), 'nothing re-enables inline script')
+
+  // The policy must be parsed BEFORE the model's markup, or a script earlier in
+  // the document would run before it applied.
+  assert(
+    srcdoc.indexOf('Content-Security-Policy') < srcdoc.indexOf('<p>hi</p>'),
+    'the policy precedes the model content',
+  )
+})
+
+await test('turning on htmlAllowScripts drops the policy but keeps the opaque origin', () => {
+  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p>hi</p>' }) }])
+  const frame = mount(html, { config: { maxPreviewHeight: 320, htmlAllowScripts: true } }).env.document.querySelector('iframe')
+  eq(frame.srcdoc.includes('Content-Security-Policy'), false, 'the model may run its own scripts')
+  assert(!frame.getAttribute('sandbox').includes('allow-same-origin'), 'but still cannot reach the host')
+})
+
+await test('a model script is present but unauthorised, so the policy refuses it', () => {
+  // The content is inline now, so the model's `<script>` genuinely IS in the
+  // document — that is expected, and the policy is what stops it. The assertion
+  // that matters is about nonces, not presence: exactly one script may run, and
+  // it is ours.
+  const hostile = '<p>a</p><script>parent.document.body.innerHTML="pwned"</script>'
+  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: hostile }) }])
+  const { env } = mount(html, { config: { maxPreviewHeight: 320 } })
+  const frame = env.document.querySelector('iframe')
+
+  const nonce = /nonce-([^']+)'/.exec(frame.srcdoc)[1]
+  const tags = [...frame.srcdoc.matchAll(/<script([^>]*)>/g)].map((match) => match[1])
+  const authorised = tags.filter((attrs) => attrs.includes(`nonce="${nonce}"`))
+  const refused = tags.filter((attrs) => !attrs.includes(`nonce="${nonce}"`))
+
+  eq(authorised.length, 1, 'exactly one script may run: the measurer')
+  eq(refused.length, 1, "the model's script is in the document")
+  eq(refused[0].includes('nonce'), false, 'and carries no nonce, so script-src refuses it')
+  eq(env.document.querySelectorAll('script').length, 0, 'nothing script-shaped reached the host document')
 })
 
 await test('a message from another window, or of another shape, is ignored', () => {
@@ -1200,25 +1263,6 @@ await test('a message from another window, or of another shape, is ignored', () 
   eq(frame.style.height, before, 'a non-numeric height is ignored')
   view.postMessage({ source: frame.contentWindow, data: { __dvk: 'height', id: frameIdOf(frame.srcdoc), height: 0 } })
   eq(frame.style.height, before, 'a zero height is ignored rather than collapsing the frame')
-})
-
-await test('the model document is carried as base64, so no markup can escape the wrapper', () => {
-  // `</script>` inside a JavaScript string literal still ends the script
-  // element as far as the HTML parser is concerned. Base64's alphabet cannot
-  // terminate anything, which is why it is used instead of escaping rules.
-  const hostile = '<p>a</p></script><script>parent.document.body.innerHTML="pwned"</script>'
-  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: hostile }) }])
-  const { env } = mount(html, { config: { maxPreviewHeight: 320 } })
-  const frame = env.document.querySelector('iframe')
-
-  assert(!frame.srcdoc.includes('parent.document'), 'the payload is not present as literal markup')
-  assert(!frame.srcdoc.includes('pwned'), 'and certainly not as executable text')
-  // The wrapper legitimately closes its own script element once, at the very end.
-  eq(frame.srcdoc.split('</' + 'script>').length - 1, 1, 'exactly one script close, the wrapper\'s own')
-  // The fixture legitimately renders the code TEXT into the host page, so
-  // 'pwned' appearing as text proves nothing. What matters is that no element
-  // was created from it and no script element exists in the host document.
-  eq(env.document.querySelectorAll('script').length, 0, 'no script element reached the host document')
 })
 
 await test('disposing a preview removes its message listener', () => {
@@ -1256,7 +1300,7 @@ await test('previewHeightMode picks between measured, fitted and fixed frames', 
   const fit = frameOf({ previewHeightMode: 'fit', maxPreviewHeight: 320 })
   eq(fit.style.height, `${fitted}px`, 'fit uses the estimate')
   eq(fit.getAttribute('sandbox'), '', 'fit needs no script permission at all')
-  eq(fit.srcdoc.includes('dvk-inner'), false, 'and no inner frame')
+  eq(fit.srcdoc.includes('Content-Security-Policy'), false, 'and no measuring policy')
 
   eq(frameOf({ previewHeightMode: 'fixed', maxPreviewHeight: 320 }).style.height, '320px', 'fixed is the cap, always')
   eq(frameOf({ previewHeightMode: 'fixed', maxPreviewHeight: 180 }).style.height, '180px', 'fixed follows the configured height')
