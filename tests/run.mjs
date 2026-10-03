@@ -1448,6 +1448,63 @@ await test('the generic label is reported as "no language", not as a language ca
 })
 
 // ---------------------------------------------------------------------------
+// the README quotes the product, so the product must still say those things
+//
+// This exists because the README drifted: it advertised `renderers: echarts,
+// html, table` when the bundle had long since logged `html, echarts, table`
+// (priority order, not registration order), listed the console lines in the
+// wrong sequence, and quoted test counts and a version that were several
+// releases stale. Every one of those is something a reader checks *first*, and
+// every one was wrong in a direction that looks like a broken install.
+//
+// A guard rather than a one-time fix: the failure mode is silent by nature.
+// ---------------------------------------------------------------------------
+
+process.stdout.write('\ndocs (README quotes must still be true)\n')
+
+await test('the README quotes the console lines the bundle actually emits', () => {
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8')
+  const run = activateBundle(BUNDLE, { fixtureHtml: ACTIVATION_FIXTURE })
+  const emitted = run.log.filter((line) => line.startsWith('[dsh-viewer-kit]'))
+  assert(emitted.length >= 3, `expected the three startup lines, saw ${emitted.length}`)
+
+  for (const line of emitted) {
+    // The count is live, so the README writes it as a placeholder.
+    const quoted = line.replace(/— \d+ code block/, '— N code block')
+    assert(readme.includes(quoted), `the README no longer quotes:\n         ${quoted}`)
+  }
+})
+
+await test('the README quotes the current version and tarball name', () => {
+  const manifest = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8')
+  assert(readme.includes(`v${manifest.version} active`), `the README does not quote v${manifest.version}`)
+  assert(
+    readme.includes(`dsh-viewer-kit-${manifest.version}.tgz`),
+    `the README's tarball name is not ${manifest.version} — npm pack produces dsh-viewer-kit-${manifest.version}.tgz`,
+  )
+})
+
+await test('the README states the exact number of tests this file declares', () => {
+  // Counted statically rather than from `passed`, because the number cannot be
+  // known until the run completes and this check runs part-way through it — a
+  // live count would make the assertion depend on where in the file it sits.
+  //
+  // Exact, not "at least": the README drifted to 40 and 49 against a suite of
+  // 90, and an understated number is just as wrong as an overstated one to a
+  // reader deciding whether the project is tested. The cost is one README edit
+  // whenever the suite grows, which is the point.
+  const source = readFileSync(new URL(import.meta.url), 'utf8')
+  const declared = (source.match(/^await test\(/gm) ?? []).length
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8')
+  const claims = [...readme.matchAll(/(\d+) 项测试/g)]
+  assert(claims.length > 0, 'the README states no test count')
+  for (const claim of claims) {
+    eq(Number(claim[1]), declared, `the README says ${claim[1]} tests; this file declares ${declared}`)
+  }
+})
+
+// ---------------------------------------------------------------------------
 
 process.stdout.write(`\n${passed} passed, ${failures.length} failed\n`)
 if (failures.length > 0) {

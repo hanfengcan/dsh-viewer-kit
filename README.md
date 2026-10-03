@@ -14,7 +14,7 @@
 
 **这对你意味着什么：**
 
-- 它能工作 —— 有 90 项测试、在真实 DSH 上验证过、打包产物有发布前自检；
+- 它能工作 —— 有 93 项测试、在真实 DSH 上验证过、打包产物有发布前自检；
 - 但请把它当成这样的东西来对待：**依赖前先读代码**，不要假设它有常规开源项目的打磨程度。
   设计取舍未必与你一致，边界情况未必被覆盖，命名和结构有明显的"边写边改"痕迹；
 - 版本号 < 1.0，**不保证 API 或配置键稳定**。
@@ -66,10 +66,12 @@ dsh plugin --profile desktop add dsh-viewer-kit
 控制台应该出现三行：
 
 ```
-[dsh-viewer-kit] renderers: echarts, html, table
 [dsh-viewer-kit] config: default view=preview, html scripts=off, max preview height=320px, chart height=360px
+[dsh-viewer-kit] renderers: html, echarts, table
 [dsh-viewer-kit] v0.9.0 active — N code block(s) enhanced
 ```
+
+> 渲染器按**优先级**排列而非注册顺序：`html` 10 > `echarts` 8 > `table` 5。
 
 排「装了但没渲染」用这一条命令：
 
@@ -219,7 +221,7 @@ DSH 的 markdown 渲染器是封闭的，没有留给插件的节点扩展点（
 
 ```powershell
 pnpm install
-pnpm run check        # 类型检查 → 构建 → 90 项测试 → 产物激活复现
+pnpm run check        # 类型检查 → 构建 → 93 项测试 → 产物激活复现
 pnpm run release      # check + 打包自检，完整发布门禁
 ```
 
@@ -296,7 +298,7 @@ src/client/
   renderers/           L5 渲染器：echarts / html / table
 src/index.js           Host 半体（仅作为 Loader 行的锚点）
 client/                ★ 构建产物，提交进库（见下）
-tests/                 90 项测试 + DOM 垫片 + 从 DSH 真实产物抄来的夹具
+tests/                 93 项测试 + DOM 垫片 + 从 DSH 真实产物抄来的夹具
 tools/                 asar 读取脚本 + 发布前自检
 docs/                  架构设计 / 渲染器作者指南
 tsdown.config.ts       ★ 客户端 bundle 的构建契约（模块格式与 chunk 规则在这里定义）
