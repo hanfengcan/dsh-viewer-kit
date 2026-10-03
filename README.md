@@ -288,14 +288,19 @@ docs/                  架构设计 / 渲染器作者指南
 tsdown.config.ts       ★ 客户端 bundle 的构建契约（模块格式与 chunk 规则在这里定义）
 ```
 
-`package.json` 的 `files` 只发布 `lib/ client/ src/ docs/ cordis.patch.yml LICENSE README.md`
-—— 装进 profile 的只需要这些；`tests/ scripts/ tools/` 与 `tsdown.config.ts` 是仓库内的工作流。
+`tests/ scripts/ tools/` 与 `tsdown.config.ts` 是仓库内的工作流，与安装无关，任何情况下都不进包。
 
 > **构建产物是提交进版本库的**，这与"不提交产物"的常规做法相反，是有意的：本仓库就是被
 > `pnpm add file:<path>` 安装的那一份，而 DSH 激活时会直接 `readFileSync` 这个 bundle，
 > 缺文件会抛 `MissingClientBundleError` 并让 entry 激活失败。提交它们，新克隆的树才开箱可装
 > —— **这一条实测过：`git clone` 后不装任何依赖，94 项测试全绿。**
 > 改完源码务必重新 `pnpm run build` 再提交。
+
+> **tarball 只装必需的东西。** `package.json` 的 `files` 只有 `lib/ client/
+> cordis.patch.yml LICENSE README.md` —— 那前两项加 patch 文件，就是宿主在安装与激活时
+> 真正会解析到的全部路径（`main`、`exports["./client"]`、`dsh.bundle.patch`，
+> 以及被入口 `require.async` 请求的引擎 chunk）。`src/` 与 `docs/` **不进包**：
+> 产物已预构建、文档在 GitHub 上，装进 profile 用不到它们，各省约 110 KB 与 160 KB。
 
 ### 升级 DSH 之后
 
