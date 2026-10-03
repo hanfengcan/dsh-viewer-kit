@@ -28,6 +28,30 @@
 > **`echarts` 围栏不需要写 HTML。** 只写 ECharts 的 option JSON 就够了，不用引 CDN、
 > 不用 `<script>`、也不需要打开 `htmlAllowScripts` —— 引擎是插件自己按需加载的代码。
 
+### 实际效果
+
+以下截图取自 DSH Desktop `0.2.0-rc.2` 真实运行，未做修饰。
+
+**`html`** —— 沙箱 iframe 渲染，高度贴合内容：
+
+![HTML 预览：沙箱渲染，高度贴合内容](docs/imgs/html.png)
+
+**`echarts`** —— 模型只写 option 的 JSON，引擎作为独立文件按需加载：
+
+![ECharts 图表：柱状 + 折线双系列](docs/imgs/echarts.png)
+
+**`csv`** —— 自实现 RFC 4180：引号内的逗号与转义引号不会被拆成两格：
+
+![CSV：引号内逗号与转义引号](docs/imgs/csv.png)
+
+**`json`** —— 只认对象数组：
+
+![JSON 对象数组渲染为表格](docs/imgs/json.png)
+
+**`markdown`** —— 管道表格，**不需要标注语言**：
+
+![Markdown 管道表格](docs/imgs/markdown.png)
+
 ### 配置
 
 所有可调项都是**插件配置**，写在 Loader 行的 `config` 里。改**当前 profile** 的行为：
@@ -169,7 +193,7 @@ __DSH_VIEWER_KIT__.diagnose()
 
 ```powershell
 pnpm install
-pnpm run check        # 类型检查 → 构建 → 93 项测试 → 产物激活复现
+pnpm run check        # 类型检查 → 构建 → 94 项测试 → 产物激活复现
 pnpm run release      # check + 打包自检，完整发布门禁
 ```
 
@@ -258,7 +282,7 @@ src/client/
   renderers/           L5 渲染器：echarts / html / table
 src/index.js           Host 半体（仅作为 Loader 行的锚点）
 client/                ★ 构建产物，提交进库（见下）
-tests/                 93 项测试 + DOM 垫片 + 从 DSH 真实产物抄来的夹具
+tests/                 94 项测试 + DOM 垫片 + 从 DSH 真实产物抄来的夹具
 tools/                 asar 读取脚本 + 发布前自检
 docs/                  架构设计 / 渲染器作者指南
 tsdown.config.ts       ★ 客户端 bundle 的构建契约（模块格式与 chunk 规则在这里定义）
@@ -270,7 +294,7 @@ tsdown.config.ts       ★ 客户端 bundle 的构建契约（模块格式与 ch
 > **构建产物是提交进版本库的**，这与"不提交产物"的常规做法相反，是有意的：本仓库就是被
 > `pnpm add file:<path>` 安装的那一份，而 DSH 激活时会直接 `readFileSync` 这个 bundle，
 > 缺文件会抛 `MissingClientBundleError` 并让 entry 激活失败。提交它们，新克隆的树才开箱可装
-> —— **这一条实测过：`git clone` 后不装任何依赖，93 项测试全绿。**
+> —— **这一条实测过：`git clone` 后不装任何依赖，94 项测试全绿。**
 > 改完源码务必重新 `pnpm run build` 再提交。
 
 ### 升级 DSH 之后

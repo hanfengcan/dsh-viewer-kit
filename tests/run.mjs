@@ -12,7 +12,7 @@
  * @module tests/run
  */
 
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -1502,6 +1502,24 @@ await test('the README states the exact number of tests this file declares', () 
   for (const claim of claims) {
     eq(Number(claim[1]), declared, `the README says ${claim[1]} tests; this file declares ${declared}`)
   }
+})
+
+await test('every screenshot the README shows exists, and every screenshot is shown', () => {
+  // A renamed screenshot renders as five broken images on GitHub, and nothing in
+  // the build notices. Both directions are checked, because an orphan file is
+  // the other half of the same rot: it looks like documentation that exists.
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8')
+  const referenced = [...readme.matchAll(/!\[[^\]]*\]\((docs\/imgs\/[^)]+)\)/g)].map((match) => match[1])
+  assert(referenced.length > 0, 'the README shows no screenshots')
+
+  for (const relative of referenced) {
+    assert(existsSync(join(ROOT, relative)), `the README references a missing image: ${relative}`)
+  }
+
+  const shown = new Set(referenced)
+  const onDisk = readdirSync(join(ROOT, 'docs', 'imgs')).map((name) => `docs/imgs/${name}`)
+  const orphans = onDisk.filter((path) => !shown.has(path))
+  eq(orphans, [], `screenshots sitting in docs/imgs that the README never shows: ${orphans.join(', ')}`)
 })
 
 // ---------------------------------------------------------------------------
