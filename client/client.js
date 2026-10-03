@@ -146,6 +146,20 @@ const SWITCH_ATTRIBUTE = "data-dvk-switch";
 */
 /**
 * @typedef {object} ViewerKitConfig
+*
+* Every field is settable from the plugin's loader row — either the shipped
+* `cordis.patch.yml` or the user's own profile patch, which overrides by `id`:
+*
+* ```yaml
+* - id: dsh-viewer-kit
+*   config:
+*     htmlAllowScripts: true
+* ```
+*
+* The client half exports no `Config` schema on purpose (see `client/index.js`),
+* so values arrive unvalidated and `resolveConfig` drops unknown keys and
+* type-checks the rest against the defaults.
+*
 * @property {boolean} enabled Master switch.
 * @property {readonly string[]} [disabledRendererIds] Renderers the user turned
 *   off. Read-only because every consumer only ever asks `includes`.
@@ -153,9 +167,9 @@ const SWITCH_ATTRIBUTE = "data-dvk-switch";
 *   code block instead of being handed to a renderer.
 * @property {number} [maxPreviewHeight] Pixel cap for an embedded preview.
 * @property {boolean} [htmlAllowScripts] Let previewed HTML run scripts inside
-*   an opaque-origin sandbox. Off by default; see docs/01-architecture.md §8.
+*   an opaque-origin sandbox. **Off by default**; see docs/01-architecture.md §8.
 * @property {boolean} [defaultToPreview] Open a freshly seen item in its
-*   enhanced view instead of the code view.
+*   enhanced view instead of the code view. **On by default.**
 */
 /** The view every surface always offers, rendered by the host itself. */
 const CODE_VIEW = Object.freeze({
@@ -945,7 +959,17 @@ const DEFAULT_CONFIG = Object.freeze({
 	maxSourceBytes: 262144,
 	maxPreviewHeight: 520,
 	htmlAllowScripts: false,
-	defaultToPreview: false
+	/**
+	* Open a claimed block in the rendered view rather than its source.
+	*
+	* Preview is the default because the whole point of the kit is to show what
+	* the content *is*: a chart, a table, a page. Reading the markup is the
+	* exception, so it costs a click. A renderer that has no preview view is
+	* unaffected — `pickInitialView` falls back to the code view when the
+	* default is not among the block's views, and a remembered per-block choice
+	* always wins over this.
+	*/
+	defaultToPreview: true
 });
 /**
 * Build a config from a partial user patch. Unknown keys are dropped so a
@@ -1703,7 +1727,7 @@ const STYLES = `
 * @module client
 */
 const NAMESPACE = "dsh-viewer-kit";
-const VERSION = "0.3.1";
+const VERSION = "0.4.0";
 /**
 * Handle to the live activation, so a second `apply` can retire the first.
 * See the guard inside `apply`.
@@ -1738,10 +1762,25 @@ const inject = [];
 */
 globalThis.__DSH_VIEWER_KIT_BOOTED__ = VERSION;
 /**
-* @param {{ get: (name: string) => unknown, effect: (callback: () => unknown, label?: string) => unknown }} ctx
+* @param {{
+*   get: (name: string) => unknown,
+*   effect: (callback: () => unknown, label?: string) => unknown,
+* }} ctx
+* @param {Partial<import('./contract.js').ViewerKitConfig>} [rowConfig]
+*   The loader row's `config` block, verbatim.
+*
+*   Cordis only validates against a `Config` schema when the plugin exports
+*   one (`resolveConfig` in `@deepseek-ai/cordis`: `if (!runtime.Config) return
+*   config`), and this half deliberately exports none — importing schemastery
+*   into a client bundle would have to resolve through the module seed table.
+*   So the row config arrives unvalidated and goes through `resolveConfig`,
+*   which drops unknown keys and type-checks every value against the defaults.
+*   A malformed config therefore degrades to defaults instead of failing the
+*   entry, which matters: a failed entry is a failed web boot.
+*
 * @returns {() => void} disposer
 */
-function apply(ctx) {
+function apply(ctx, rowConfig) {
 	const doc = globalThis.document;
 	const log = globalThis.console;
 	if (doc?.body == null) return () => {};
@@ -1762,6 +1801,9 @@ function apply(ctx) {
 	const kit = createKit({ onError: (error, context) => {
 		log.error(`[${NAMESPACE}] ${context.rendererId} failed on ${context.requestId}`, error);
 	} });
+	kit.setConfig(rowConfig);
+	const settings = kit.config();
+	log.log(`[${NAMESPACE}] config: default view=${settings.defaultToPreview ? "preview" : "code"}, html scripts=${settings.htmlAllowScripts ? "on" : "off"}, max preview height=${settings.maxPreviewHeight}px` + (settings.disabledRendererIds.length > 0 ? `, disabled renderers=${settings.disabledRendererIds.join(",")}` : ""));
 	teardown.push(...RENDERER_FACTORIES.map((factory) => kit.register(factory(t))));
 	log.log(`[${NAMESPACE}] renderers: ${kit.renderers().map((renderer) => renderer.id).join(", ")}`);
 	teardown.push(installStyles(doc));

@@ -19,7 +19,17 @@ export const DEFAULT_CONFIG = Object.freeze({
   maxSourceBytes: 256 * 1024,
   maxPreviewHeight: 520,
   htmlAllowScripts: false,
-  defaultToPreview: false,
+  /**
+   * Open a claimed block in the rendered view rather than its source.
+   *
+   * Preview is the default because the whole point of the kit is to show what
+   * the content *is*: a chart, a table, a page. Reading the markup is the
+   * exception, so it costs a click. A renderer that has no preview view is
+   * unaffected — `pickInitialView` falls back to the code view when the
+   * default is not among the block's views, and a remembered per-block choice
+   * always wins over this.
+   */
+  defaultToPreview: true,
 })
 
 /**

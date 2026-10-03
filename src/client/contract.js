@@ -83,6 +83,20 @@
 
 /**
  * @typedef {object} ViewerKitConfig
+ *
+ * Every field is settable from the plugin's loader row — either the shipped
+ * `cordis.patch.yml` or the user's own profile patch, which overrides by `id`:
+ *
+ * ```yaml
+ * - id: dsh-viewer-kit
+ *   config:
+ *     htmlAllowScripts: true
+ * ```
+ *
+ * The client half exports no `Config` schema on purpose (see `client/index.js`),
+ * so values arrive unvalidated and `resolveConfig` drops unknown keys and
+ * type-checks the rest against the defaults.
+ *
  * @property {boolean} enabled Master switch.
  * @property {readonly string[]} [disabledRendererIds] Renderers the user turned
  *   off. Read-only because every consumer only ever asks `includes`.
@@ -90,9 +104,9 @@
  *   code block instead of being handed to a renderer.
  * @property {number} [maxPreviewHeight] Pixel cap for an embedded preview.
  * @property {boolean} [htmlAllowScripts] Let previewed HTML run scripts inside
- *   an opaque-origin sandbox. Off by default; see docs/01-architecture.md §8.
+ *   an opaque-origin sandbox. **Off by default**; see docs/01-architecture.md §8.
  * @property {boolean} [defaultToPreview] Open a freshly seen item in its
- *   enhanced view instead of the code view.
+ *   enhanced view instead of the code view. **On by default.**
  */
 
 /** The view every surface always offers, rendered by the host itself. */

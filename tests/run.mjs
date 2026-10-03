@@ -273,14 +273,26 @@ const frame = (doc) => doc.querySelector('iframe')
 /** @param {import('./dom-shim.mjs').ShimElement} node */
 const click = (node) => node.dispatch('click')
 
-await test('an html fence gains a two-view switch and starts on code', () => {
+await test('an html fence gains a two-view switch and opens in preview', () => {
   const { env } = mount(conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) }]))
   const sw = switcher(env.document)
   assert(sw !== null, 'a view switch was added')
   eq(sw.children.map((b) => b.getAttribute('data-dvk-view')), ['preview', 'code'], 'preview first, code last')
+  eq(sw.children.find((b) => b.getAttribute('data-dvk-view') === 'preview').getAttribute('aria-pressed'), 'true', 'preview is active')
+  eq(content(env.document).getAttribute('data-dvk-mode'), 'preview', 'mode attribute set')
+  assert(frame(env.document) !== null, 'the preview is mounted on arrival, with no click')
+})
+
+await test('a code-first config still opens on code and mounts nothing', () => {
+  const { env } = mount(
+    conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) }]),
+    { config: { defaultToPreview: false } },
+  )
+  const sw = switcher(env.document)
   eq(sw.children.find((b) => b.getAttribute('data-dvk-view') === 'code').getAttribute('aria-pressed'), 'true', 'code is active')
   eq(content(env.document).getAttribute('data-dvk-mode'), 'code', 'mode attribute set')
   eq(ourRoot(env.document)?.children.length, 0, 'our root exists but is empty while showing code')
+  eq(frame(env.document), null, 'no preview is built for a block nobody is going to look at')
 })
 
 await test('the native code subtree is never touched', () => {
@@ -291,10 +303,9 @@ await test('the native code subtree is never touched', () => {
   eq(content(env.document).children.length, 2, 'our root is appended after it, never merged into it')
 })
 
-await test('switching to preview mounts a sandboxed frame and hides the source', () => {
+await test('the preview mounts a sandboxed frame and hides the source', () => {
   const { env } = mount(conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) }]))
-  click(switcher(env.document).children[0])
-  eq(content(env.document).getAttribute('data-dvk-mode'), 'preview', 'mode switched')
+  eq(content(env.document).getAttribute('data-dvk-mode'), 'preview', 'it opened in preview')
   const f = frame(env.document)
   assert(f !== null, 'a preview frame exists')
   eq(f.parentNode, ourRoot(env.document), 'mounted inside our own root')
@@ -308,19 +319,27 @@ await test('the preview never grants allow-same-origin, even with scripts on', (
   const { env } = mount(conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) }]), {
     config: { htmlAllowScripts: true },
   })
-  click(switcher(env.document).children[0])
   const f = frame(env.document)
   eq(f.getAttribute('sandbox'), 'allow-scripts', 'scripts allowed')
   assert(!(f.getAttribute('sandbox') ?? '').includes('allow-same-origin'), 'origin stays opaque — this is the whole point')
 })
 
-await test('switching back to code removes the frame and restores the source', () => {
+await test('switching to code removes the frame and restores the source', () => {
   const { env } = mount(conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) }]))
-  click(switcher(env.document).children[0])
   click(switcher(env.document).children[1])
+  eq(content(env.document).getAttribute('data-dvk-mode'), 'code', 'mode switched')
   eq(frame(env.document), null, 'the browsing context is dropped, not just hidden')
   eq(ourRoot(env.document).children.length, 0, 'our root is emptied')
   eq(content(env.document).querySelector('pre').textContent, HTML_SAMPLE, 'source still intact')
+})
+
+await test('switching back to preview re-mounts the frame', () => {
+  const { env } = mount(conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) }]))
+  click(switcher(env.document).children[1])
+  eq(frame(env.document), null, 'code view has no frame')
+  click(switcher(env.document).children[0])
+  eq(content(env.document).getAttribute('data-dvk-mode'), 'preview', 'back in preview')
+  assert(frame(env.document) !== null, 'the frame came back')
 })
 
 await test('a language no renderer claims is left completely alone', () => {
@@ -359,34 +378,37 @@ await test('a streaming block is not taken over; it is once settled', async () =
 await test('the view choice is remembered for the same content', () => {
   const storage = new ShimStorage()
   const first = mount(conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) }]), { storage })
-  click(switcher(first.env.document).children[0])
+  // Deliberately switch AWAY from the default, so a pass means "remembered"
+  // rather than "happened to match the default".
+  click(switcher(first.env.document).children[1])
   first.seam.dispose()
 
   const second = mount(conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) }]), { storage })
-  eq(switcher(second.env.document).children[0].getAttribute('aria-pressed'), 'true', 'reopened in preview')
+  eq(switcher(second.env.document).children[1].getAttribute('aria-pressed'), 'true', 'reopened on code, not on the default')
+  eq(frame(second.env.document), null, 'and built no preview')
 })
 
 await test('different content does not inherit a remembered view', () => {
   const storage = new ShimStorage()
   const first = mount(conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) }]), { storage })
-  click(switcher(first.env.document).children[0])
+  click(switcher(first.env.document).children[1])
   first.seam.dispose()
 
   const second = mount(conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p>other</p>' }) }]), { storage })
-  eq(switcher(second.env.document).children[1].getAttribute('aria-pressed'), 'true', 'starts on code again')
+  eq(switcher(second.env.document).children[0].getAttribute('aria-pressed'), 'true', 'unrelated content falls back to the default')
 })
 
 await test('the same content in a different message gets its own view state', () => {
   const storage = new ShimStorage()
   const first = mount(conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) }]), { storage })
-  click(switcher(first.env.document).children[0])
+  click(switcher(first.env.document).children[1])
   first.seam.dispose()
 
   const second = mount(
     conversationFixture([{ nodeKey: 'n-2', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) }]),
     { storage },
   )
-  eq(switcher(second.env.document).children[1].getAttribute('aria-pressed'), 'true', 'scope separates messages')
+  eq(switcher(second.env.document).children[0].getAttribute('aria-pressed'), 'true', 'scope separates messages')
 })
 
 await test('an oversized html block is not enhanced', () => {
@@ -645,13 +667,87 @@ await test('a host that already carries our namespace does not fail the entry', 
   eq(run.switches, 1, 'still enhances with a pre-registered namespace')
 })
 
+await test('a claimed block opens in preview without any click', () => {
+  const run = activateBundle(BUNDLE, { fixtureHtml: ACTIVATION_FIXTURE })
+  eq(run.applied.ok, true, 'apply() did not throw')
+  eq(run.mode(), 'preview', 'the block is in preview mode on arrival')
+  assert(run.env.document.querySelector('iframe') !== null, 'the preview is already mounted')
+  eq(run.env.document.querySelector('iframe').getAttribute('sandbox'), '', 'sandboxed with no capabilities')
+
+  // The switch still reads correctly: preview pressed, code not.
+  const sw = run.env.document.querySelector('[data-dvk-switch]')
+  assert(sw !== null, 'view switch present')
+  eq(sw.children[0].getAttribute('data-dvk-view'), 'preview', 'preview is the first view')
+  eq(sw.children[0].getAttribute('aria-pressed'), 'true', 'preview is the pressed one')
+  eq(sw.children[1].getAttribute('data-dvk-view'), 'code', 'code is the second view')
+  eq(sw.children[1].getAttribute('aria-pressed'), 'false', 'code is not pressed')
+})
+
+await test('switching to code drops the preview and leaves the source intact', () => {
+  const run = activateBundle(BUNDLE, { fixtureHtml: ACTIVATION_FIXTURE })
+  const sw = run.env.document.querySelector('[data-dvk-switch]')
+  sw.children[1].dispatch('click')
+
+  eq(run.mode(), 'code', 'now in code mode')
+  eq(run.env.document.querySelector('iframe'), null, 'the preview was torn down')
+  eq(run.env.document.querySelector('[data-code-block-content] pre').textContent, HTML_SAMPLE, 'source untouched')
+
+  // And back.
+  sw.children[0].dispatch('click')
+  eq(run.mode(), 'preview', 'back in preview')
+  assert(run.env.document.querySelector('iframe') !== null, 'preview remounted')
+})
+
+await test('the row config reaches apply and can restore the code-first default', () => {
+  const run = activateBundle(BUNDLE, {
+    fixtureHtml: ACTIVATION_FIXTURE,
+    rowConfig: { defaultToPreview: false },
+  })
+  eq(run.applied.ok, true, 'apply() did not throw')
+  eq(run.mode(), 'code', 'the row config won over the shipped default')
+  eq(run.env.document.querySelector('iframe'), null, 'nothing is previewed')
+  eq(run.live().kit.config().defaultToPreview, false, 'the kit reports the resolved config')
+})
+
+await test('the row config can turn on scripts for the html preview', () => {
+  const run = activateBundle(BUNDLE, {
+    fixtureHtml: ACTIVATION_FIXTURE,
+    rowConfig: { htmlAllowScripts: true },
+  })
+  const iframe = run.env.document.querySelector('iframe')
+  assert(iframe !== null, 'preview mounted')
+  eq(iframe.getAttribute('sandbox'), 'allow-scripts', 'scripts allowed, same-origin still withheld')
+  eq(run.mode(), 'preview', 'still preview-first')
+  eq(run.live().kit.config().htmlAllowScripts, true, 'the kit reports the resolved config')
+})
+
+await test('a malformed row config degrades to defaults instead of failing the entry', () => {
+  // The client half exports no `Config` schema, so cordis forwards the row
+  // config unvalidated. A bad one must never fail the entry — a failed entry
+  // is a failed web boot.
+  const cases = [
+    null,
+    'not-an-object',
+    42,
+    { defaultToPreview: 'yes', maxPreviewHeight: 'tall', disabledRendererIds: 'html' },
+    JSON.parse('{"__proto__":{"polluted":true},"unknownKey":true}'),
+  ]
+  for (const rowConfig of cases) {
+    const run = activateBundle(BUNDLE, { fixtureHtml: ACTIVATION_FIXTURE, rowConfig })
+    eq(run.applied.ok, true, `apply() survived rowConfig=${JSON.stringify(rowConfig)}`)
+    eq(run.switches, 1, 'still enhances')
+    // Wrong-typed fields fall back to the shipped default rather than breaking.
+    eq(run.live().kit.config().defaultToPreview, true, 'defaultToPreview fell back to true')
+    eq(run.live().kit.config().maxPreviewHeight, 520, 'maxPreviewHeight fell back to 520')
+  }
+  eq({}.polluted, undefined, 'no prototype pollution leaked out')
+})
+
 await test('preview mounts from the shipped bundle and unload restores the page', () => {
   const run = activateBundle(BUNDLE, { fixtureHtml: ACTIVATION_FIXTURE })
   const sw = run.env.document.querySelector('[data-dvk-switch]')
   assert(sw !== null, 'view switch present')
-  sw.children[0].dispatch('click')
   assert(run.env.document.querySelector('iframe') !== null, 'preview mounts')
-  eq(run.env.document.querySelector('iframe').getAttribute('sandbox'), '', 'sandboxed')
 
   run.unload()
   eq(run.env.document.querySelector('[data-dvk-switch]'), null, 'our switch is gone')

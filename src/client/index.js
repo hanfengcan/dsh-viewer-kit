@@ -34,7 +34,7 @@ import { createTranslator } from './locale.js'
 import { installStyles } from './styles.js'
 
 const NAMESPACE = 'dsh-viewer-kit'
-const VERSION = '0.3.1'
+const VERSION = '0.4.0'
 
 /**
  * Handle to the live activation, so a second `apply` can retire the first.
@@ -74,10 +74,25 @@ export const inject = []
 globalThis.__DSH_VIEWER_KIT_BOOTED__ = VERSION
 
 /**
- * @param {{ get: (name: string) => unknown, effect: (callback: () => unknown, label?: string) => unknown }} ctx
+ * @param {{
+ *   get: (name: string) => unknown,
+ *   effect: (callback: () => unknown, label?: string) => unknown,
+ * }} ctx
+ * @param {Partial<import('./contract.js').ViewerKitConfig>} [rowConfig]
+ *   The loader row's `config` block, verbatim.
+ *
+ *   Cordis only validates against a `Config` schema when the plugin exports
+ *   one (`resolveConfig` in `@deepseek-ai/cordis`: `if (!runtime.Config) return
+ *   config`), and this half deliberately exports none — importing schemastery
+ *   into a client bundle would have to resolve through the module seed table.
+ *   So the row config arrives unvalidated and goes through `resolveConfig`,
+ *   which drops unknown keys and type-checks every value against the defaults.
+ *   A malformed config therefore degrades to defaults instead of failing the
+ *   entry, which matters: a failed entry is a failed web boot.
+ *
  * @returns {() => void} disposer
  */
-export function apply(ctx) {
+export function apply(ctx, rowConfig) {
   const doc = globalThis.document
   const log = globalThis.console
   if (doc?.body == null) {
@@ -112,6 +127,17 @@ export function apply(ctx) {
       log.error(`[${NAMESPACE}] ${context.rendererId} failed on ${context.requestId}`, error)
     },
   })
+
+  // Before anything is registered or negotiated, so the row config governs the
+  // very first scan. `resolveConfig` fills every absent key from the defaults.
+  kit.setConfig(rowConfig)
+  const settings = kit.config()
+  log.log(
+    `[${NAMESPACE}] config: default view=${settings.defaultToPreview ? 'preview' : 'code'}` +
+      `, html scripts=${settings.htmlAllowScripts ? 'on' : 'off'}` +
+      `, max preview height=${settings.maxPreviewHeight}px` +
+      (settings.disabledRendererIds.length > 0 ? `, disabled renderers=${settings.disabledRendererIds.join(',')}` : ''),
+  )
 
   teardown.push(...RENDERER_FACTORIES.map((factory) => kit.register(factory(t))))
   log.log(`[${NAMESPACE}] renderers: ${kit.renderers().map((renderer) => renderer.id).join(', ')}`)

@@ -159,7 +159,9 @@ export function activateBundle(bundleSource, options = {}) {
   /** @type {{ ok: boolean, error?: Error }} */
   const applied = { ok: false }
   try {
-    loaded?.apply(harness.ctx)
+    // The second argument is the loader row's `config` block, which cordis
+    // forwards verbatim when the plugin exports no `Config` schema.
+    loaded?.apply(harness.ctx, options.rowConfig)
     applied.ok = true
   } catch (error) {
     applied.error = /** @type {Error} */ (error)
@@ -173,6 +175,10 @@ export function activateBundle(bundleSource, options = {}) {
     switches: env.document.querySelectorAll('[data-dvk-switch]').length,
     hook: vm.runInContext('typeof globalThis.__DSH_VIEWER_KIT__', sandbox),
     bootMarker: vm.runInContext('typeof globalThis.__DSH_VIEWER_KIT_BOOTED__', sandbox),
+    /** The live hook object, for asserting on config-driven behaviour. */
+    live: () => vm.runInContext('globalThis.__DSH_VIEWER_KIT__ ?? null', sandbox),
+    /** Which view the fixture block is currently showing. */
+    mode: () => env.document.querySelector('[data-code-block-content]')?.getAttribute('data-dvk-mode') ?? null,
     /** Run every registered effect disposer, newest first — what unload does. */
     unload() {
       for (const effect of [...harness.effects].reverse()) effect.dispose()
