@@ -138,7 +138,7 @@ dsh plugin --profile desktop add ./dsh-viewer-kit-0.9.0.tgz
 
 > 渲染器按**优先级**排列而非注册顺序：`html` 10 > `echarts` 8 > `table` 5。
 
-排「装了但没渲染」用这一条命令：
+排障时用这一条命令：
 
 ```js
 __DSH_VIEWER_KIT__.diagnose()
@@ -152,12 +152,8 @@ __DSH_VIEWER_KIT__.diagnose()
 | `outsideConversation > 0` | 那些块在其它标签页，**故意不碰**，不是漏认 |
 | `enhanced > 0` | 在工作，去看代码块头部有没有切换按钮 |
 
-### 一条禁令
-
-**不要手改 profile 的 `cordis.patch.yml` 去插插件行。** 那一行是 Loader 的**生成物**；
-下一次任何 `dsh plugin add` 都会重写整个文件，那行就没了，插件静默消失。
-走 `dsh plugin add`，它会进 profile 的 `dependencies` 与 `dsh.profile.bundles`，
-之后不再被冲掉。（这一点本项目真的踩过，复盘见架构文档 §13.4。）
+> 排障时可能去翻 profile 的 `cordis.patch.yml`。那里的一行是 `dsh plugin add` **生成**的，
+> **别自己加** —— 下次任何 `dsh plugin add` 都会重写整个文件，手加的行会跟着插件一起静默消失。
 
 ---
 
@@ -203,9 +199,8 @@ pnpm run preflight   # 打包 → 解包到临时目录 → 校验 → 清理
 判成**启动失败**）、host 半体能否 import、按需加载的引擎 chunk 是否在包里并与入口请求的
 文件名一致，最后让解出来的客户端 bundle 在严格 `ctx` 下真实激活一次。
 
-> 这个自检做过**负向测试**：把 `client/client.js` 改名、把 patch 行写成别的包名、
-> 删掉 `dsh.bundle` 声明、去掉引擎 chunk —— 四种破坏都被精确报出。
-> 一个不会失败的检查比没有检查更坏。
+> 这个自检做过**负向测试** —— 改坏产物名、写错 patch 里的包名、删掉声明、去掉 chunk，
+> 四种破坏都能被报出。一个不会失败的检查比没有检查更坏。
 
 ---
 
