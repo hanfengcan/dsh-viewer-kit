@@ -3,33 +3,17 @@
 给 [DeepSeek Harness](https://deepseek-harness.github.io/deepseek-harness/)（`dsh`）对话窗口用的
 **可插拔内容渲染层**：让代码块除了「源码」之外还能有「渲染结果」，两者一键切换。
 
-模型输出 ` ```html `，代码块头部就多出一个 `预览 | 代码` 切换；表格、ECharts 图表同理。
+> **这是一个 vibe coding 项目。** 代码绝大部分由 AI 在对话中生成，作者负责提需求、验证结果、
+> 以及在它跑偏时把方向纠回来。它能工作、有测试，但**依赖前请先读代码** ——
+> 不要假设它有常规开源项目的打磨程度。版本号 < 1.0，配置键不保证稳定。
 
 ---
 
-## ⚠️ 这是一个 vibe coding 项目
+## 1. 功能与配置
 
-**代码绝大部分由 AI 在对话中生成，不是手写的。** 作者的角色是提需求、验证结果、
-以及在它跑偏时把方向纠回来。
+### 它做什么
 
-**这对你意味着什么：**
-
-- 它能工作 —— 有 93 项测试、在真实 DSH 上验证过、打包产物有发布前自检；
-- 但请把它当成这样的东西来对待：**依赖前先读代码**，不要假设它有常规开源项目的打磨程度。
-  设计取舍未必与你一致，边界情况未必被覆盖，命名和结构有明显的"边写边改"痕迹；
-- 版本号 < 1.0，**不保证 API 或配置键稳定**。
-
-**一个也许值得一提的例外。** 这个项目对"平台事实"尽量写了证据出处，并且**保留了失败复盘**
-—— 包括几次由 AI 自己的错误假设造成的崩溃。`docs/01-architecture.md` §13 里能读到几条
-**被实测推翻的判断**，每条都写了错在哪、怎么发现的、以及留下了什么防线。
-
-这是对 vibe coding 常见弱点的针对性补偿。它是补偿，不是保证。
-
----
-
-## 它做什么
-
-| 围栏 | 切换 | 预览是怎么来的 |
+| 围栏 | 切换 | 渲染结果是怎么来的 |
 |---|---|---|
 | `html` `svg` | 预览 / 代码 | 沙箱 iframe 真实渲染，默认禁脚本 |
 | `csv` `tsv` | 表格 / 代码 | 自己实现 RFC 4180 解析，DOM 建表（不解析标记） |
@@ -44,52 +28,7 @@
 > **`echarts` 围栏不需要写 HTML。** 只写 ECharts 的 option JSON 就够了，不用引 CDN、
 > 不用 `<script>`、也不需要打开 `htmlAllowScripts` —— 引擎是插件自己按需加载的代码。
 
----
-
-## 安装
-
-需要一个已经能跑起来的 DSH profile。**两条路线都不需要授予任何构建权限：**
-
-```powershell
-# A. 从 tarball（适合内网/离线）
-npm pack
-dsh plugin --profile desktop add ./dsh-viewer-kit-0.9.0.tgz
-
-# B. 从 npm
-dsh plugin --profile desktop add dsh-viewer-kit
-```
-
-装完**刷新页面**（`Ctrl+Shift+R`）即可，宿主会热加载，不用重启 DSH。
-
-### 确认它活着
-
-控制台应该出现三行：
-
-```
-[dsh-viewer-kit] config: default view=preview, html scripts=off, max preview height=320px, chart height=360px
-[dsh-viewer-kit] renderers: html, echarts, table
-[dsh-viewer-kit] v0.9.0 active — N code block(s) enhanced
-```
-
-> 渲染器按**优先级**排列而非注册顺序：`html` 10 > `echarts` 8 > `table` 5。
-
-排「装了但没渲染」用这一条命令：
-
-```js
-__DSH_VIEWER_KIT__.diagnose()
-```
-
-| 现象 | 含义 |
-|---|---|
-| `__DSH_VIEWER_KIT__` 是 `undefined` | 客户端半体没加载 → 硬刷新 |
-| `blocks: 0` | 插件活着，但页面上没有 `.md-code-block` → 那段内容不是围栏代码块 |
-| `unclaimed` 里有你的语言 | 找到了但没被认领 → 看 `languages` 里实际读到什么 |
-| `outsideConversation > 0` | 那些块在其它标签页，**故意不碰**，不是漏认 |
-| `enhanced > 0` | 在工作，去看代码块头部有没有切换按钮 |
-
----
-
-## 配置
+### 配置
 
 所有可调项都是**插件配置**，写在 Loader 行的 `config` 里。改**当前 profile** 的行为：
 
@@ -123,14 +62,14 @@ __DSH_VIEWER_KIT__.diagnose()
 | `fixed` | 完整显示，**下方留白到固定高度** | 超过即滚动 | 完全可预期，但短内容必然有留白 |
 
 **为什么默认是 `measure`：** DSH 自己的代码视图**也没有固定高度** —— `<pre>` 只设了
-`padding` 与 `overflow-x:auto`，高度由内容决定（证据：
-`._block_7gxqk_4 :where(pre)`，见 `src/client/dom-contract.js`）。固定预览高度会让两个
-互相切换的视图行为不一致。测量让预览和它旁边的代码视图保持同一种语义：内容多高就多高。
+`padding` 与 `overflow-x:auto`，高度由内容决定（证据：`._block_7gxqk_4 :where(pre)`，
+见 `src/client/dom-contract.js`）。固定预览高度会让两个互相切换的视图行为不一致。
+测量让预览和它旁边的代码视图保持同一种语义：内容多高就多高。
 
 **为什么需要脚本：** `<iframe>` 是替换元素，它的高度**永不来自内部文档** ——
 `max-height` 只能限制默认的 150px，CSS 里没有任何写法能表达"短内容全显、长内容滚动"。
-所以高度只能被测出来。渲染方的取舍是：把测量脚本放进文档量自己的内容，
-而不是去跨 browsing context 读 —— 后者在规范上不可能成立（见下）。
+所以高度只能被测出来。取舍是把测量脚本放进文档里量自己，而不是去跨 browsing context 读
+—— 后者在规范上不可能成立（sandbox 标志会被嵌套 frame 继承并取并集）。
 
 ### 关于 `htmlAllowScripts`
 
@@ -145,17 +84,13 @@ __DSH_VIEWER_KIT__.diagnose()
 > `.volatile()` 的字段，且**目前没有任何客户端实现按 schema 自动生成表单**。
 > 所以现阶段开关是上面这段 patch 文本，不是界面里的一个勾。
 
----
-
-## 已知限制
-
-**这一节请认真读，尤其是打算长期用的人。**
+### 已知限制
 
 1. **强耦合 DSH 的内部 DOM。** 插件不注册 Slot、不重写组件，而是在 DSH 的
-   `[data-code-block-content]` 旁边挂自己的节点 —— 那个节点是官方 CSS 注释里标注的
+   `[data-code-block-content]` 旁边挂自己的节点 —— 那节点是官方 CSS 注释标注的
    "stable content node"，但它依然是**内部实现**。核对版本：**DSH Desktop `0.2.0-rc.2`**。
    DSH 升级后形状一旦改变，插件会**静默不生效**（不是崩溃）。核对入口只有一个文件：
-   `src/client/dom-contract.js`，升级步骤见下。
+   `src/client/dom-contract.js`，升级步骤见 §4。
 
 2. **围栏语言名可能是空的。** DSH 的语言表是 **Shiki 内置的，不支持自定义**，
    banner 只在有高亮器时才写语言名。所以 ` ```echarts ` 拿到的标签是通用文案，
@@ -163,23 +98,120 @@ __DSH_VIEWER_KIT__.diagnose()
    的非数组对象就是图表）。内容启发式**可能判错** —— 判错时表现为某个块多了个切换按钮，
    不会有更糟的后果，但它确实是一条启发式。
 
-3. **`measure` 模式给预览 frame 开了 `allow-scripts`。** 这是为了跑测量脚本。
-   模型自己的脚本由 **CSP nonce 策略**拒绝（`script-src 'nonce-…'`，无 `unsafe-inline`，
-   连带 `on*` 与 `javascript:` 一起挡），而 frame 保持不透明源，所以两道防线独立生效。
-   介意"frame 带脚本权限"这件事的人可以设 `previewHeightMode: fit`，那是**零脚本权限**的，
-   代价是高度靠估算。
+3. **`measure` 模式给预览 frame 开了 `allow-scripts`**（为了跑测量脚本）。模型自己的脚本由
+   **CSP nonce 策略**拒绝，frame 保持不透明源，两道防线独立生效。介意的人可以设
+   `previewHeightMode: fit` —— 那是**零脚本权限**的，代价是高度靠估算。
 
-4. **只覆盖会话标签页**，且只覆盖 `.md-code-block`。工具卡片、附件、其它面板里的内容
-   不在范围内。
-
-5. **不要手改 profile 的 `cordis.patch.yml` 去插插件行。** 那一行是 Loader 的**生成物**；
-   下一次任何 `dsh plugin add` 都会重写整个文件，那行就没了，插件静默消失。
-   走 `dsh plugin add`，它会进 profile 的 `dependencies` 与 `dsh.profile.bundles`，
-   之后不再被冲掉。（这一点本项目真的踩过，复盘见架构文档 §13.4。）
+4. **只覆盖会话标签页的 `.md-code-block`。** 工具卡片、附件、其它面板里的内容不在范围内。
 
 ---
 
-## 它是怎么工作的
+## 2. 安装
+
+**本项目不发布到 npm**，从本地目录或打包好的 tarball 安装。
+
+```powershell
+# A. 从本地目录（开发时最常用）
+dsh plugin --profile desktop add file:E:\path\to\dsh-viewer-kit
+
+# B. 从 tarball（适合分发给别人 / 内网）
+npm pack                                        # prepack 已配好，会自动构建
+dsh plugin --profile desktop add ./dsh-viewer-kit-0.9.0.tgz
+```
+
+装完**刷新页面**（`Ctrl+Shift+R`）即可，宿主会热加载，不用重启 DSH。
+
+> **不要走 `github:` 直装。** 官方《[打包与安装插件](https://deepseek-harness.github.io/deepseek-harness/develop/basic/publish)》
+> 明确警告：git 安装拉的是**源码不是产物**，pnpm ≥10 会拒绝运行它的 `prepare` 脚本，
+> 除非用户在 profile 的 `pnpm-workspace.yaml` 里写 `allowBuilds` —— 那等于**允许该包的代码
+> 在安装时于本机执行、且不在任何沙箱内**。分发预构建产物就没有这道坎。
+
+### 确认它活着
+
+控制台应该出现三行：
+
+```
+[dsh-viewer-kit] config: default view=preview, html scripts=off, max preview height=320px, chart height=360px
+[dsh-viewer-kit] renderers: html, echarts, table
+[dsh-viewer-kit] v0.9.0 active — N code block(s) enhanced
+```
+
+> 渲染器按**优先级**排列而非注册顺序：`html` 10 > `echarts` 8 > `table` 5。
+
+排「装了但没渲染」用这一条命令：
+
+```js
+__DSH_VIEWER_KIT__.diagnose()
+```
+
+| 现象 | 含义 |
+|---|---|
+| `__DSH_VIEWER_KIT__` 是 `undefined` | 客户端半体没加载 → 硬刷新 |
+| `blocks: 0` | 插件活着，但页面上没有 `.md-code-block` → 那段内容不是围栏代码块 |
+| `unclaimed` 里有你的语言 | 找到了但没被认领 → 看 `languages` 里实际读到什么 |
+| `outsideConversation > 0` | 那些块在其它标签页，**故意不碰**，不是漏认 |
+| `enhanced > 0` | 在工作，去看代码块头部有没有切换按钮 |
+
+### 一条禁令
+
+**不要手改 profile 的 `cordis.patch.yml` 去插插件行。** 那一行是 Loader 的**生成物**；
+下一次任何 `dsh plugin add` 都会重写整个文件，那行就没了，插件静默消失。
+走 `dsh plugin add`，它会进 profile 的 `dependencies` 与 `dsh.profile.bundles`，
+之后不再被冲掉。（这一点本项目真的踩过，复盘见架构文档 §13.4。）
+
+---
+
+## 3. 开发
+
+构建走 **tsdown** —— 与官方 `dsh-experimental-client-ui-voice-input` 和社区 `dshmarket`
+同一条管线，产物是 DSH 客户端模块系统要求的
+`window.__ModuleLoader__.load({ id, factory })` 经典脚本格式。
+
+```powershell
+pnpm install
+pnpm run check        # 类型检查 → 构建 → 93 项测试 → 产物激活复现
+pnpm run release      # check + 打包自检，完整发布门禁
+```
+
+需要 **Node ≥ 22**（tsdown 用到 `Promise.withResolvers`）。仓库用 `.node-version` 声明 `24`，
+`package.json` 的 `engines.node` 兜底。**用版本管理器显式选定**，因为 `pnpm run` 是用
+PATH 上的 `node` 拉起子进程的，PATH 上是旧版会直接失败：
+
+```powershell
+fnm use                                   # 交互式：靠 .node-version 自动切
+fnm exec --using=24 -- pnpm run check     # 脚本/CI：不依赖 shell 配置
+```
+
+### 开发循环
+
+```
+pnpm run build  →  重新安装  →  刷新页面
+```
+
+pnpm 把 `file:` 目录依赖**拷贝**进 profile 的 `node_modules`（不是硬链接），所以光构建不重装，
+profile 里那份会停在安装那一刻的内容，**而且任何地方都不报错**。`install_bundle` 在 lockfile
+未变时会回 `Already up to date` 拒绝重装，需要先移除再安装。
+
+### 发布前自检
+
+```powershell
+pnpm run preflight   # 打包 → 解包到临时目录 → 校验 → 清理
+```
+
+校验的是**用户真正拿到的那份字节**，而不是工作树：manifest 的声明、`exports["./client"]`
+能否解析（解析不到就是 `MissingClientBundleError`，而渲染进程的 boot 审计会把 entry 失败
+判成**启动失败**）、host 半体能否 import、按需加载的引擎 chunk 是否在包里并与入口请求的
+文件名一致，最后让解出来的客户端 bundle 在严格 `ctx` 下真实激活一次。
+
+> 这个自检做过**负向测试**：把 `client/client.js` 改名、把 patch 行写成别的包名、
+> 删掉 `dsh.bundle` 声明、去掉引擎 chunk —— 四种破坏都被精确报出。
+> 一个不会失败的检查比没有检查更坏。
+
+---
+
+## 4. 其他
+
+### 它是怎么工作的
 
 DSH 的 markdown 渲染器是封闭的，没有留给插件的节点扩展点（证据见 `docs/01-architecture.md` §2.3）。
 所以本插件**不注册任何 Slot、不重写任何组件**，只在 DSH 自己标注为"给消费者用"的节点上挂东西：
@@ -211,78 +243,7 @@ DSH 的 markdown 渲染器是封闭的，没有留给插件的节点扩展点（
 架构与取舍的完整记录在 [`docs/01-architecture.md`](docs/01-architecture.md)；
 新增一个渲染器见 [`docs/02-renderer-authoring.md`](docs/02-renderer-authoring.md)。
 
----
-
-## 开发
-
-构建走 **tsdown** —— 与官方 `dsh-experimental-client-ui-voice-input` 和社区 `dshmarket`
-同一条管线，产物是 DSH 客户端模块系统要求的
-`window.__ModuleLoader__.load({ id, factory })` 经典脚本格式。
-
-```powershell
-pnpm install
-pnpm run check        # 类型检查 → 构建 → 93 项测试 → 产物激活复现
-pnpm run release      # check + 打包自检，完整发布门禁
-```
-
-需要 **Node ≥ 22**（tsdown 用到 `Promise.withResolvers`）。仓库用 `.node-version` 声明 `24`，
-`package.json` 的 `engines.node` 兜底。**用版本管理器显式选定**，因为 `pnpm run` 是用
-PATH 上的 `node` 拉起子进程的，PATH 上是旧版会直接失败：
-
-```powershell
-fnm use                                   # 交互式：靠 .node-version 自动切
-fnm exec --using=24 -- pnpm run check     # 脚本/CI：不依赖 shell 配置
-```
-
-开发循环是 **`pnpm run build` → 重新安装 → 刷新页面**。注意 pnpm 把 `file:` 目录依赖
-**拷贝**进 profile 的 `node_modules`（不是硬链接），所以光构建不重装，profile 里那份会
-停在安装那一刻的内容，**而且任何地方都不报错**。`install_bundle` 在 lockfile 未变时会回
-`Already up to date` 拒绝重装，需要先移除再安装。
-
----
-
-## 分发
-
-依据官方《[打包与安装插件](https://deepseek-harness.github.io/deepseek-harness/develop/basic/publish)》，
-组合包声明 `dsh.bundle.patch` 指向包内一个按**包名**引用自身的 patch：
-
-```jsonc
-// package.json
-"dsh": {
-  "bundle": { "patch": "./cordis.patch.yml" },   // 这个包贡献哪一层
-  "client": { "platform": "web" }                // 这个包有客户端半体
-}
-```
-```yaml
-# cordis.patch.yml —— 行里写包名，Node 的模块解析才找得到已安装的代码
-- insert:
-    - id: dsh-viewer-kit
-      name: 'dsh-viewer-kit'
-```
-
-```powershell
-pnpm run preflight  # 打包 → 解包到临时目录 → 校验 → 清理
-npm pack            # prepack 已配好，会自动构建
-npm publish         # 同样在 publish 阶段构建好产物
-```
-
-**不要走 `github:` 直装。** 官方文档明确警告：git 安装拉的是**源码不是产物**，
-pnpm ≥10 会拒绝运行它的 `prepare` 脚本，除非用户在 profile 的 `pnpm-workspace.yaml`
-里写 `allowBuilds` —— 那等于**允许该包的代码在安装时于本机执行、且不在任何沙箱内**。
-分发预构建产物就没有这道坎。
-
-`preflight` 校验的是**用户真正拿到的那份字节**，而不是工作树：manifest 的声明、
-`exports["./client"]` 能否解析（解析不到就是 `MissingClientBundleError`，而渲染进程的
-boot 审计会把 entry 失败判成**启动失败**）、host 半体能否 import、按需加载的引擎 chunk
-是否在包里并与入口请求的文件名一致，最后让解出来的客户端 bundle 在严格 `ctx` 下真实激活一次。
-
-> 这个自检做过**负向测试**：把 `client/client.js` 改名、把 patch 行写成别的包名、
-> 删掉 `dsh.bundle` 声明、去掉引擎 chunk —— 四种破坏都被精确报出。
-> 一个不会失败的检查比没有检查更坏。
-
----
-
-## 目录
+### 目录
 
 ```
 src/client/
@@ -309,12 +270,11 @@ tsdown.config.ts       ★ 客户端 bundle 的构建契约（模块格式与 ch
 
 > **构建产物是提交进版本库的**，这与"不提交产物"的常规做法相反，是有意的：本仓库就是被
 > `pnpm add file:<path>` 安装的那一份，而 DSH 激活时会直接 `readFileSync` 这个 bundle，
-> 缺文件会抛 `MissingClientBundleError` 并让 entry 激活失败。提交它们，新克隆的树才开箱可装。
+> 缺文件会抛 `MissingClientBundleError` 并让 entry 激活失败。提交它们，新克隆的树才开箱可装
+> —— **这一条实测过：`git clone` 后不装任何依赖，93 项测试全绿。**
 > 改完源码务必重新 `pnpm run build` 再提交。
 
----
-
-## 升级 DSH 之后
+### 升级 DSH 之后
 
 （在**本仓库**里做，不需要动装进 profile 的那份。）
 
@@ -322,11 +282,9 @@ tsdown.config.ts       ★ 客户端 bundle 的构建契约（模块格式与 ch
    （`tools/README.md` 记了 asar 头部格式的坑）；
 2. 核对 `src/client/dom-contract.js` 里引用的 DOM 形状与行号 —— 只有这一个文件需要改；
 3. `pnpm run check`：类型检查、产物构建、夹具与断言会告诉你变了什么；
-4. 重新安装（见上文"安装"），让宿主拿到新的 `client/client.js`。
+4. 重新安装（见 §2），让宿主拿到新的 `client/client.js`。
 
----
-
-## 安全
+### 安全
 
 模型产出的 HTML 属于**不可信输入**。预览一律走 `<iframe sandbox>`：
 
@@ -340,8 +298,6 @@ tsdown.config.ts       ★ 客户端 bundle 的构建契约（模块格式与 ch
 已知的残留风险：渲染一段 HTML **可以发起该内容里的网络请求**（远程图片、CSS），
 这一条在**所有**配置下都成立，因为浏览器必须加载子资源才能排版。
 
----
-
-## 许可
+### 许可
 
 MIT
