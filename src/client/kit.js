@@ -17,7 +17,16 @@ export const DEFAULT_CONFIG = Object.freeze({
   enabled: true,
   disabledRendererIds: Object.freeze([]),
   maxSourceBytes: 256 * 1024,
-  maxPreviewHeight: 520,
+  /**
+   * Tallest an embedded preview may grow, in CSS pixels.
+   *
+   * 320 rather than a taller figure because a preview is a glance, not a page
+   * view: at 520 a short document left a band of empty frame in the middle of
+   * the conversation, which reads as broken rather than generous. Anything
+   * taller scrolls inside the frame, which is the honest signal that there is
+   * more to see.
+   */
+  maxPreviewHeight: 320,
   htmlAllowScripts: false,
   /**
    * Height of an embedded chart, in CSS pixels.

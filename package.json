@@ -1,6 +1,6 @@
 {
   "name": "dsh-viewer-kit",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Pluggable content renderers for the DeepSeek Harness conversation: preview/code switching for HTML, and a renderer registry to grow.",
   "type": "module",
   "license": "MIT",

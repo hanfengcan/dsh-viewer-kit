@@ -493,6 +493,7 @@ await test('diagnose() separates "not claimed" from "not settled"', () => {
     pending: 1,
     languages: ['html', 'python'],
     unclaimed: ['python'],
+    outsideConversation: 0,
   }, 'reports both kinds of miss')
 })
 
@@ -768,7 +769,7 @@ await test('a malformed row config degrades to defaults instead of failing the e
     eq(run.switches, 1, 'still enhances')
     // Wrong-typed fields fall back to the shipped default rather than breaking.
     eq(run.live().kit.config().defaultToPreview, true, 'defaultToPreview fell back to true')
-    eq(run.live().kit.config().maxPreviewHeight, 520, 'maxPreviewHeight fell back to 520')
+    eq(run.live().kit.config().maxPreviewHeight, 320, 'maxPreviewHeight fell back to 320')
   }
   eq({}.polluted, undefined, 'no prototype pollution leaked out')
 })
@@ -1083,6 +1084,37 @@ await test('a fence DSH cannot highlight is recognised from its content', async 
   eq(env.document.querySelectorAll('.fake-canvas').length, 1, 'and the engine drew')
 })
 
+await test('a code block outside the conversation view is never touched', () => {
+  // The trajectory tab renders its own `.md-code-block` elements — its bundle
+  // carries `markdownPreview`, `assistantContent` and a `.md-code-block` style
+  // rule — and the seam used to root at `doc.body`, so it enhanced a panel this
+  // plugin was never asked to touch. The boundary is empirical: the chat bundle
+  // sets ~60 `data-chat-*` attributes and the trajectory bundle sets none.
+  const trajBlock = codeBlockFixture({ lang: 'html', code: HTML_SAMPLE })
+  const { env, seam } = mount(
+    // No `data-chat-*` ancestor anywhere around this one.
+    `<div class="trajectory-panel">${trajBlock}</div>` +
+      conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) }]),
+  )
+  eq(env.document.querySelectorAll('[data-dvk-switch]').length, 1, 'only the conversation block was enhanced')
+  eq(seam.size(), 1, 'one surface')
+  eq(seam.diagnose().blocks, 1, 'the other panel is not even counted as a block')
+  eq(seam.diagnose().outsideConversation, 1, 'and it is reported separately, not as an unclaimed language')
+  eq(seam.diagnose().unclaimed, [], 'a block we deliberately skip is not a renderer miss')
+})
+
+await test('the conversation boundary accepts any of the chat containers', () => {
+  // `data-chat-flow` is on the flow container and `data-chat-node-key` on each
+  // message row. Requiring only one would silently drop blocks the day that
+  // nesting moves, so either must work.
+  for (const attr of ['data-chat-flow', 'data-chat-node-key', 'data-chat-turn', 'data-chat-group-key']) {
+    const { env } = mount(
+      `<div ${attr}="x">${codeBlockFixture({ lang: 'html', code: HTML_SAMPLE })}</div>`,
+    )
+    eq(env.document.querySelectorAll('[data-dvk-switch]').length, 1, `claimed under ${attr}`)
+  }
+})
+
 await test('the preview frame is sized from what paints, not from source lines', async () => {
   // A sandboxed frame cannot be measured — `sandbox=""` means an opaque origin
   // and a null contentDocument — so the height is computed. Counting source
@@ -1090,21 +1122,34 @@ await test('the preview frame is sized from what paints, not from source lines',
   // doctype are markup nobody sees, and the report was a frame with a band of
   // empty space under a two-heading document.
   const { estimateHeight: estimate } = await import('../src/client/renderers/html.js')
-  const cap = 520
+  const cap = 320
 
-  const short = estimate('<!doctype html><html><head><style>body{margin:0}</style></head><body><h1>Hi</h1><p>One line.</p></body></html>', cap)
-  const tall = estimate(
-    '<!doctype html><html><head><style>' + 'a{color:red}'.repeat(400) + '</style></head><body>' +
-      '<h1>Title</h1><p>' + 'word '.repeat(200) + '</p><p>' + 'word '.repeat(200) + '</p></body></html>',
+  // A designed document — a card with its own padding — is the shape that
+  // exposed this: the estimate has to clear its real height or the frame shows
+  // a scrollbar over content that nearly fits.
+  const card = estimate(
+    '<style>body{margin:24px;font:16px sans-serif}</style><div style="padding:28px">' +
+      '<div>SANDBOXED PREVIEW</div><h1>你好，预览</h1><p>我在一个 sandbox 的 iframe 里。</p>' +
+      '<div><span>零第三方依赖</span><span>不抢宿主的渲染</span></div></div>',
     cap,
   )
-  assert(short < 200, `a short document got ${short}px; the empty space is still there`)
-  assert(tall > short * 2, `a long document got only ${tall}px against ${short}px — the estimator is not tracking content`)
-  eq(estimate('<html><head><style>a{}</style></head><body></body></html>', cap), 96,
-    'a document with no visible content still gets a clickable strip, not a sliver')
-  eq(estimate('<h1>x</h1>', cap), 124, 'a heading is priced as a heading, not as a body line')
-  eq(estimate('<p>' + 'word '.repeat(5000) + '</p>', cap), cap, 'a very long document stops at the user cap')
-  eq(estimate('<p>hi</p>', 40), 40, 'a cap below the floor wins, so a user can force a small frame')
+  assert(card > 240, `a padded card got ${card}px; its own padding was not accounted for`)
+
+  const tall = estimate('<p>' + 'word '.repeat(3000) + '</p>', cap)
+  eq(tall, cap, 'a very long document stops at the user cap')
+
+  // Markup nobody sees must not inflate the estimate — that was the original
+  // bug, and it is why the old version reported a band of empty frame.
+  eq(
+    estimate('<style>' + 'a{color:red}'.repeat(500) + '</style><h1>x</h1>', cap),
+    estimate('<h1>x</h1>', cap),
+    'a large <style> block costs nothing',
+  )
+
+  eq(estimate('<html><body></body></html>', cap), 101,
+    'an empty document still gets a clickable strip, not a sliver')
+  eq(estimate('<h1>x</h1>', cap), 189, 'a heading is priced as a heading, not as a body line')
+  eq(estimate('<p>hi</p>', 40), 40, 'a cap below the natural minimum wins, so a user can force a small frame')
   assert(
     estimate('<h1>a</h1><h2>b</h2><h1>c</h1>', cap) > estimate('<p>a</p><p>b</p><p>c</p>', cap),
     'headings are not priced as body lines',

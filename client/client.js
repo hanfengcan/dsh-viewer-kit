@@ -481,6 +481,34 @@ const GENERIC_LABELS = /* @__PURE__ */ new Set([
 	"文本"
 ]);
 /**
+* Containers that only the CONVERSATION view renders.
+*
+* This seam used to root at `doc.body`, and the trajectory tab renders its own
+* `.md-code-block` elements — its bundle carries `markdownPreview`,
+* `assistantContent`, and a `.md-code-block` style rule — so a body-wide scan
+* enhanced blocks in a panel this plugin was never asked to touch.
+*
+* The boundary is empirical, not assumed: the chat bundle sets ~60 `data-chat-*`
+* attributes and the trajectory bundle sets **none** of them. So "has a
+* conversation container ancestor" separates the two views without knowing
+* anything about how the shell arranges its tabs.
+*
+* A union rather than one attribute, because the nesting is DSH's business:
+* `data-chat-flow` sits on the flow container and `data-chat-node-key` on each
+* message row, and a block may be under either. Picking one would silently drop
+* blocks the day that layout moves.
+*/
+const CONVERSATION_SELECTOR = "[data-chat-flow],[data-chat-node-key],[data-chat-turn],[data-chat-group-key]";
+/**
+* Whether a block belongs to the conversation view.
+*
+* @param {Element} element
+* @returns {boolean}
+*/
+function inConversation(element) {
+	return element.closest(CONVERSATION_SELECTOR) !== null;
+}
+/**
 * Read the message scope used to key view state.
 *
 * @param {Element} element
@@ -602,7 +630,8 @@ function createDomSeam(options) {
 				enhanced: 0,
 				pending: 0,
 				languages: [],
-				unclaimed: []
+				unclaimed: [],
+				outsideConversation: 0
 			})
 		};
 	}
@@ -621,6 +650,7 @@ function createDomSeam(options) {
 	*/
 	function evaluate(element) {
 		if (disposed || surfaces.has(element)) return;
+		if (!inConversation(element)) return;
 		const content = element.querySelector(CONTENT_SELECTOR);
 		if (content === null) {
 			schedule(element);
@@ -737,10 +767,12 @@ function createDomSeam(options) {
 		*   pending: number,
 		*   languages: string[],
 		*   unclaimed: string[],
+		*   outsideConversation: number,
 		* }}
 		*/
 		diagnose() {
-			const blocks = [...root.querySelectorAll(CODE_BLOCK_SELECTOR)];
+			const all = [...root.querySelectorAll(CODE_BLOCK_SELECTOR)];
+			const blocks = all.filter((element) => inConversation(element));
 			const report = {
 				blocks: blocks.length,
 				withBanner: 0,
@@ -749,7 +781,8 @@ function createDomSeam(options) {
 				enhanced: 0,
 				pending: 0,
 				languages: [],
-				unclaimed: []
+				unclaimed: [],
+				outsideConversation: all.length - blocks.length
 			};
 			/** @type {Set<string>} */
 			const languages = /* @__PURE__ */ new Set();
@@ -1065,9 +1098,27 @@ function withCharset(source) {
 	return `<meta charset="utf-8">\n${source}`;
 }
 /** Vertical padding a rendered document has around its content. */
-const FRAME_PADDING = 48;
-/** Tallest and shortest frame worth showing, before the user's cap applies. */
-const MIN_FRAME = 96;
+const FRAME_PADDING = 72;
+/**
+* Slack applied to the estimate.
+*
+* An estimate that is too tall costs a little empty space; one that is too
+* short puts a scrollbar on content that nearly fits, which is the complaint
+* this was written to answer. Those are not equally annoying, so the number is
+* deliberately biased upward. It is a bias, not a measurement — see the note on
+* `estimateHeight` for why a real measurement is not available here.
+*/
+const SAFETY_FACTOR = 1.15;
+/**
+* The default body margin a previewed document brings with it.
+*
+* The frame deliberately does NOT reset the document's own styles — the author
+* wrote those, and rewriting them would mean the preview shows something other
+* than what the HTML says. But the browser's default 8px top and bottom margin
+* is real height, and leaving it out of the estimate is what makes a document
+* that fits produce a scrollbar anyway: the frame comes out 16px short.
+*/
+const BROWSER_BODY_MARGIN = 16;
 /** Block-level tags: each one starts a new visual line. */
 const BLOCK_TAG = /<\/?(?:p|div|section|article|header|footer|main|aside|nav|ul|ol|li|dl|dt|dd|table|thead|tbody|tfoot|tr|td|th|blockquote|pre|figure|figcaption|form|fieldset|h[1-6]|address)\b[^>]*>/gi;
 /** Hard line breaks and rules. */
@@ -1113,9 +1164,8 @@ function estimateHeight(source, cap) {
 		if (content === "") continue;
 		body += 24 * Math.max(1, Math.ceil(content.length / 72));
 	}
-	const total = body + headingTotal + FRAME_PADDING;
-	if (cap < MIN_FRAME) return cap;
-	return Math.min(cap, Math.max(MIN_FRAME, total));
+	const total = Math.round((body + headingTotal + FRAME_PADDING + BROWSER_BODY_MARGIN) * SAFETY_FACTOR);
+	return Math.min(cap, total);
 }
 /**
 * @param {(key: string, fallback: string) => string} t
@@ -1298,7 +1348,16 @@ const DEFAULT_CONFIG = Object.freeze({
 	enabled: true,
 	disabledRendererIds: Object.freeze([]),
 	maxSourceBytes: 262144,
-	maxPreviewHeight: 520,
+	/**
+	* Tallest an embedded preview may grow, in CSS pixels.
+	*
+	* 320 rather than a taller figure because a preview is a glance, not a page
+	* view: at 520 a short document left a band of empty frame in the middle of
+	* the conversation, which reads as broken rather than generous. Anything
+	* taller scrolls inside the frame, which is the honest signal that there is
+	* more to see.
+	*/
+	maxPreviewHeight: 320,
 	htmlAllowScripts: false,
 	/**
 	* Height of an embedded chart, in CSS pixels.
@@ -2151,7 +2210,7 @@ const STYLES = `
 * @module client
 */
 const NAMESPACE = "dsh-viewer-kit";
-const VERSION = "0.7.0";
+const VERSION = "0.8.0";
 /**
 * Handle to the live activation, so a second `apply` can retire the first.
 * See the guard inside `apply`.

@@ -35,7 +35,7 @@ import { createTranslator } from './locale.js'
 import { installStyles } from './styles.js'
 
 const NAMESPACE = 'dsh-viewer-kit'
-const VERSION = '0.7.0'
+const VERSION = '0.8.0'
 
 /**
  * Handle to the live activation, so a second `apply` can retire the first.

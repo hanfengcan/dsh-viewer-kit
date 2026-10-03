@@ -41,6 +41,36 @@ const GENERIC_LABELS = new Set([
 ])
 
 /**
+ * Containers that only the CONVERSATION view renders.
+ *
+ * This seam used to root at `doc.body`, and the trajectory tab renders its own
+ * `.md-code-block` elements — its bundle carries `markdownPreview`,
+ * `assistantContent`, and a `.md-code-block` style rule — so a body-wide scan
+ * enhanced blocks in a panel this plugin was never asked to touch.
+ *
+ * The boundary is empirical, not assumed: the chat bundle sets ~60 `data-chat-*`
+ * attributes and the trajectory bundle sets **none** of them. So "has a
+ * conversation container ancestor" separates the two views without knowing
+ * anything about how the shell arranges its tabs.
+ *
+ * A union rather than one attribute, because the nesting is DSH's business:
+ * `data-chat-flow` sits on the flow container and `data-chat-node-key` on each
+ * message row, and a block may be under either. Picking one would silently drop
+ * blocks the day that layout moves.
+ */
+const CONVERSATION_SELECTOR = '[data-chat-flow],[data-chat-node-key],[data-chat-turn],[data-chat-group-key]'
+
+/**
+ * Whether a block belongs to the conversation view.
+ *
+ * @param {Element} element
+ * @returns {boolean}
+ */
+function inConversation(element) {
+  return element.closest(CONVERSATION_SELECTOR) !== null
+}
+
+/**
  * Read the message scope used to key view state.
  *
  * @param {Element} element
@@ -175,6 +205,7 @@ export function createDomSeam(options) {
         pending: 0,
         languages: [],
         unclaimed: [],
+        outsideConversation: 0,
       }),
     }
   }
@@ -195,6 +226,10 @@ export function createDomSeam(options) {
    */
   function evaluate(element) {
     if (disposed || surfaces.has(element)) return
+    // Not our surface to touch. Deliberately no `schedule`: a block in another
+    // panel will never become a conversation block, so retrying it would only
+    // burn the retry budget and log noise.
+    if (!inConversation(element)) return
     const content = element.querySelector(CONTENT_SELECTOR)
     if (content === null) {
       // No viewport node: not a block shape we know. Retry briefly in case it
@@ -343,10 +378,16 @@ export function createDomSeam(options) {
      *   pending: number,
      *   languages: string[],
      *   unclaimed: string[],
+     *   outsideConversation: number,
      * }}
      */
     diagnose() {
-      const blocks = [...root.querySelectorAll(CODE_BLOCK_SELECTOR)]
+      const all = [...root.querySelectorAll(CODE_BLOCK_SELECTOR)]
+      // Blocks outside the conversation view are not misses and must not be
+      // reported as if a renderer declined them — the trajectory panel renders
+      // its own `.md-code-block`s, and counting those here would send anyone
+      // reading this output chasing a bug in the renderers.
+      const blocks = all.filter((element) => inConversation(/** @type {Element} */ (element)))
       const report = {
         blocks: blocks.length,
         withBanner: 0,
@@ -356,6 +397,7 @@ export function createDomSeam(options) {
         pending: 0,
         languages: [],
         unclaimed: [],
+        outsideConversation: all.length - blocks.length,
       }
       /** @type {Set<string>} */
       const languages = new Set()

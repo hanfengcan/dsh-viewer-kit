@@ -23,10 +23,29 @@ function withCharset(source) {
 }
 
 /** Vertical padding a rendered document has around its content. */
-const FRAME_PADDING = 48
+const FRAME_PADDING = 72
 
-/** Tallest and shortest frame worth showing, before the user's cap applies. */
-const MIN_FRAME = 96
+/**
+ * Slack applied to the estimate.
+ *
+ * An estimate that is too tall costs a little empty space; one that is too
+ * short puts a scrollbar on content that nearly fits, which is the complaint
+ * this was written to answer. Those are not equally annoying, so the number is
+ * deliberately biased upward. It is a bias, not a measurement — see the note on
+ * `estimateHeight` for why a real measurement is not available here.
+ */
+const SAFETY_FACTOR = 1.15
+
+/**
+ * The default body margin a previewed document brings with it.
+ *
+ * The frame deliberately does NOT reset the document's own styles — the author
+ * wrote those, and rewriting them would mean the preview shows something other
+ * than what the HTML says. But the browser's default 8px top and bottom margin
+ * is real height, and leaving it out of the estimate is what makes a document
+ * that fits produce a scrollbar anyway: the frame comes out 16px short.
+ */
+const BROWSER_BODY_MARGIN = 16
 const MAX_FRAME_FLOOR = 1600
 
 /** Block-level tags: each one starts a new visual line. */
@@ -85,12 +104,11 @@ export function estimateHeight(source, cap) {
     body += 24 * Math.max(1, Math.ceil(content.length / 72))
   }
 
-  const total = body + headingTotal + FRAME_PADDING
-  // The user's cap is honoured even when it is below the floor: someone who
-  // sets `maxPreviewHeight: 40` is asking for a 40px frame, and quietly giving
-  // them 96px would make the setting a lie.
-  if (cap < MIN_FRAME) return cap
-  return Math.min(cap, Math.max(MIN_FRAME, total))
+  const total = Math.round((body + headingTotal + FRAME_PADDING + BROWSER_BODY_MARGIN) * SAFETY_FACTOR)
+  // The cap is the only bound: `FRAME_PADDING` already keeps an empty document
+  // from collapsing to a sliver, so a separate floor would be dead code — and a
+  // dead constant is worse than none, because it reads as a guarantee.
+  return Math.min(cap, total)
 }
 
 /**

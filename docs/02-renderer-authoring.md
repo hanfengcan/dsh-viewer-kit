@@ -7,9 +7,23 @@
 > 这不是承诺，是已经发生过的事：`renderers/table.js` 是在 `html.js` 之后
 > 单独加进去的，当时内核与接缝一行都没改，也没有多写一个 DOM 夹具。
 
+> **但有一个前提，先说清楚：以上只对"自包含"渲染器成立。**
+> `renderers/echarts.js` 是第二个真实交付物，它需要**四处**改动（引擎 chunk、
+> 构建配置、可能还有 L1 的识别判据）。两档的完整对照见
+> [`docs/01-architecture.md` §4.6](01-architecture.md#46-两档渲染器这条主张的边界实测修正)。
+>
+> 先回答"我要不要引入一个引擎库"：
+>
+> | | 自包含 | 带引擎 |
+> |---|---|---|
+> | 例子 | `table`（自己解析 CSV/JSON） | `echarts`（1.4 MB 引擎） |
+> | 改动 | 本文件 + 1 行注册 | 本文件 + `chunks/` + `tsdown.config.ts` + 可能改 L1 |
+> | 包体 | 几 KB | 引擎独立成 chunk，按需 fetch |
+> | 围栏识别 | 语言名可靠（`csv`/`json`/`markdown` 都在 Shiki 表里） | **可能拿不到语言名，见第 3 节** |
+
 ---
 
-## 0. 你需要改动的全部
+## 0. 你需要改动的全部（自包含渲染器）
 
 ```
 src/client/renderers/<你的渲染器>.js     ← 新建，就这一个文件
@@ -92,6 +106,41 @@ const RENDERER_FACTORIES = [createHtmlRenderer, createTableRenderer, createMerma
   meta?: { info?: string }
 }
 ```
+
+### 2.1 `lang` 可能是空串，而这不是错误
+
+**这是本 kit 最容易踩的坑，值得单独一节。**
+
+DSH 的 `CodeToolbar` 渲染 `supportsHighlighting(lang) ? lang : <fallback>`，
+`supportsHighlighting` 查的是 Shiki 内置的 `LANG_ALIASES`——**不支持自定义围栏语言**。
+后果：
+
+```
+```csv       → Shiki 认识 → banner 显示 "csv"      → lang = 'csv'
+```markdown  → Shiki 认识 → banner 显示 "markdown" → lang = 'markdown'
+```echarts   → Shiki 不认识 → banner 显示 "代码块"  → lang = ''
+```
+
+围栏的真实名字**在 DOM 里根本不存在**，也没有 `data-lang` 之类的后备属性。
+所以 `lang` 为 `''` 有两种可能：围栏本来就没写语言，或者写了但 DSH 不认识。
+
+**你的 `match` 必须能处理这种情况**，否则模型写什么围栏名都白搭：
+
+```js
+match(request) {
+  if (MY_LANGUAGES.has(request.lang)) return true   // ① 语言名可靠时，照旧
+  return looksLikeMyContent(request.source)         // ② 否则看内容
+}
+```
+
+流式安全也是靠内容而不是定时器：**流式中的内容解析不了，判据自然不通过**，
+等补全的那次 mutation 到达就认领。不要靠"等一会儿"来区分。
+
+`renderers/echarts.js` 的判据是"能 `JSON.parse` 成**非数组对象**且含**非空 `series` 数组**"。
+判据要**够特异**：太松会把别人的代码块抢过来，太紧则形同虚设。
+
+> `table` 之所以没暴露这个问题，纯属运气——它认领的 `csv` / `json` / `markdown`
+> 恰好都在 Shiki 表里。**下一个渲染器不一定会这么走运。**
 
 `lang` 的归一化规则（`contract.js` 的 `normalizeLang`）与 DSH 自己的取值方式一致：
 取 fence 串开头的 `/^[\w-]+/`，转小写，然后折叠别名（`htm`→`html`、`chart`→`echarts`、
@@ -264,17 +313,59 @@ pnpm test
 ```
 
 > 构建是标准的 tsdown 管线，产物格式（`window.__ModuleLoader__.load({ id, factory })`）
-> 定义在 `tsdown.config.ts`。你写渲染器时**不需要关心它**——正常写 ESM 即可，
+> 定义在 `tsdown.config.ts`。**自包含**渲染器不需要关心它——正常写 ESM 即可，
 > 相对 import、命名导出、`export const` 都支持。
+
+### 9.1 要引入引擎库时（带引擎渲染器）
+
+一个 1 MB 以上的库**不能**内联进入口 bundle：它会让每个用户、每次启动都付这个代价。
+本 kit 的做法是把它拆成独立文件、按需 fetch，用的**是 DSH 原生的 chunk 机制**，
+不是自建路由。四条契约（全部从 `@deepseek-ai/dsh-client-modules` 与宿主路由读出，
+并可用 `scripts/probe-chunk.mjs` 复验）：
+
+1. **文件名**必须匹配 `/^client\.[A-Za-z0-9][A-Za-z0-9._-]*\.js$/`，且与入口**同目录**；
+2. **不能带内容 hash** —— chunk 的 id 是 `<包名>/<文件名>` 而它要自己注册这个 id，
+   带 hash 就自指循环。也不需要：请求 URL 带有入口文件的 `?rev=`，重建必然换 URL；
+3. **入口必须用 `require.async('./client.x.js')`，不能用 `import()`** ——
+   CJS 下 `import()` 编译成普通 `require`，会抛 `missed the module table`；
+4. **每个产物需要各自的 `__ModuleLoader__.load({ id })`**，所以 `banner` 必须是
+   以 chunk 名为参数的**函数**。
+
+引擎声明为**第二个 entry**而非代码分割产物：第 3 条的请求是一个没有 import 表达式
+支撑的字符串，打包器看不见它。
+
+还要检查**引擎里有没有 Node 惯用法**。ECharts/zrender 会判断
+`process.env.NODE_ENV`（实测 236 处），浏览器没有 `process`，chunk 一求值就抛
+`process is not defined`。用构建期 `define` 替换掉，值是 **JSON 引号形式**
+（裸的 `production` 是语法错误）：
+
+```ts
+define: { 'process.env.NODE_ENV': JSON.stringify('production') }
+```
+
+`tests/run.mjs` 里有一节专测这些产物性质（chunk 不含活跃 `process` 引用、
+入口不含引擎代码、注册 id 与文件名一致、tarball 里带着 chunk）——
+**夹具里的假引擎永远测不出这类问题，必须读真实产物。**
 
 ---
 
 ## 10. 提交前自查
 
+**自包含渲染器：**
+
 - [ ] 只新增/修改了 `renderers/` 下的文件和 `index.js` 里的一行
 - [ ] `match()` 是纯函数，不抛异常（真会抛也要能被外层兜住）
+- [ ] **`match()` 在 `lang === ''` 时仍然能靠内容做出判断**（见 §2.1）
 - [ ] `dispose()` 释放了所有副作用（定时器、`ResizeObserver`、子组件、事件监听）
 - [ ] 没有 `innerHTML` / `insertAdjacentHTML` 用来放模型的原始文本
 - [ ] 需要沙箱的地方，`sandbox` 和 `allow-same-origin` 没有同时出现
 - [ ] `t('view.<id>', …)` 在中英字典里都补了
 - [ ] `pnpm run check` 全绿（类型检查 + 构建 + 测试）
+
+**带引擎渲染器，额外：**
+
+- [ ] 引擎在 `chunks/` 里，入口 bundle 体积没有明显增长（有测试守着）
+- [ ] chunk 文件名满足宿主路由的 `CLIENT_CHUNK` 模式，且注册的 id 与之一致
+- [ ] 入口用 `require.async`，没有动态 `import()`
+- [ ] chunk 里没有活跃的 `process` / `node:` 引用（有测试守着）
+- [ ] 引擎加载失败时**显示可读原因**而不是空白框（用户拿到的是 HTTP 状态码或导出键名）
