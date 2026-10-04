@@ -196,7 +196,11 @@ export function createKit(options = {}) {
         document: surface.document,
         mount: surface.mount,
         clearView: surface.clearView,
-        limits: { maxSourceBytes: config.maxSourceBytes, maxPreviewHeight: config.maxPreviewHeight },
+        limits: {
+          maxSourceBytes: config.maxSourceBytes,
+          maxPreviewHeight: config.maxPreviewHeight,
+          maxTableHeight: config.maxTableHeight,
+        },
         fail,
         config: () => config,
       }

@@ -702,6 +702,231 @@ await test('the table renderer does not steal html fences from the html renderer
 })
 
 // ---------------------------------------------------------------------------
+// height caps and the enlarge affordance
+//
+// Two separate defects, one shared cause. The table view's stylesheet used to
+// read `max-height: inherit`, which took the parent `.dvk-view` — a box that
+// sets only padding — and therefore computed to `none`. The cap was not applied
+// and, because the wrap then never scrolled, the sticky header had no bounded
+// scrollport to stick to either: two declarations that looked like they were
+// doing the work and did nothing. A 500-row table grew the conversation to
+// roughly 13,000px.
+//
+// The cap and the enlarge control are a pair on purpose. Capping alone would
+// take away the only way to see every row at once, which is what capping was
+// supposed to improve.
+// ---------------------------------------------------------------------------
+
+process.stdout.write('\nheight caps and enlarge\n')
+
+/** A CSV with `count` data rows, so the table is taller than any cap. */
+const tallCsv = (count) => {
+  const rows = ['name,value']
+  for (let index = 0; index < count; index += 1) rows.push(`row-${index},${index}`)
+  return rows.join('\n')
+}
+
+/** @param {import('./dom-shim.mjs').ShimDocument} doc */
+const expandButton = (doc) => doc.querySelector('[data-dvk-action="expand"]')
+
+await test('a table is capped, and the cap comes from config rather than a stylesheet constant', () => {
+  const table = createTableRenderer((_key, fallback) => fallback)
+  const long = tallCsv(400)
+  const { env } = mount(conversationFixture([
+    { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'csv', code: long }) },
+  ]), { renderers: [table], config: { maxTableHeight: 300 } })
+
+  const wrap = env.document.querySelector('.dvk-table-wrap')
+  assert(wrap !== null, 'the table wrap exists')
+  eq(wrap.style.maxHeight, '300px', 'the configured cap is applied inline')
+
+  // And the default, so a config that never mentions it is still capped rather
+  // than silently uncapped.
+  const plain = mount(conversationFixture([
+    { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'csv', code: long }) },
+  ]), { renderers: [table] })
+  eq(plain.env.document.querySelector('.dvk-table-wrap').style.maxHeight, '480px', 'default cap')
+})
+
+await test('a cap of zero or a negative number is refused rather than blanking the table', () => {
+  // The same reasoning as chartHeight: a value the reader cannot see is worse
+  // than the default. A `max-height: 0` table would render as a sliver.
+  eq(resolveConfig({ maxTableHeight: 0 }).maxTableHeight, 480, 'zero falls back')
+  eq(resolveConfig({ maxTableHeight: -10 }).maxTableHeight, 480, 'negative falls back')
+  eq(resolveConfig({ maxTableHeight: 'tall' }).maxTableHeight, 480, 'wrong type falls back')
+  eq(resolveConfig({ maxTableHeight: 900 }).maxTableHeight, 900, 'a real value is kept')
+})
+
+await test('enlarging a table lifts the cap in place, and only for that table', () => {
+  const table = createTableRenderer((_key, fallback) => fallback)
+  const { env } = mount(conversationFixture([
+    { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'csv', code: tallCsv(400) }) },
+    { nodeKey: 'n-2', html: codeBlockFixture({ lang: 'csv', code: tallCsv(5) }) },
+  ]), { renderers: [table] })
+
+  const wraps = env.document.querySelectorAll('.dvk-table-wrap')
+  eq(wraps.length, 2, 'both blocks rendered a table')
+  const buttons = env.document.querySelectorAll('[data-dvk-action="expand"]')
+  eq(buttons.length, 2, 'both blocks offer enlarge')
+
+  click(buttons[0])
+  eq(wraps[0].style.maxHeight, '', 'the first table is no longer capped')
+  eq(wraps[1].style.maxHeight, '480px', 'the second table is untouched')
+  eq(buttons[0].getAttribute('aria-pressed'), 'true', 'the button reports the state')
+
+  click(buttons[0])
+  eq(wraps[0].style.maxHeight, '480px', 'pressing again puts the cap back')
+  eq(buttons[0].getAttribute('aria-pressed'), 'false', 'and the button follows')
+})
+
+await test('a table remembers its enlarged state across a view switch', () => {
+  // `enter` empties the view root, so a flag that lived only in the DOM would
+  // silently reset the moment the user looked at the source and came back.
+  const table = createTableRenderer((_key, fallback) => fallback)
+  const { env } = mount(conversationFixture([
+    { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'csv', code: tallCsv(400) }) },
+  ]), { renderers: [table] })
+
+  const sw = switcher(env.document)
+  click(expandButton(env.document))
+  click(sw.children[1])
+  eq(env.document.querySelector('.dvk-table-wrap'), null, 'the code view mounts nothing')
+  click(sw.children[0])
+  eq(env.document.querySelector('.dvk-table-wrap').style.maxHeight, '', 'the enlarged state survived the round trip')
+})
+
+await test('the code view offers no enlarge control, because there is nothing to enlarge', () => {
+  const table = createTableRenderer((_key, fallback) => fallback)
+  const { env } = mount(conversationFixture([
+    { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'csv', code: tallCsv(400) }) },
+  ]), { renderers: [table] })
+  click(switcher(env.document).children[1])
+  eq(expandButton(env.document), null, 'no button while the source is showing')
+  click(switcher(env.document).children[0])
+  assert(expandButton(env.document) !== null, 'it comes back with the table')
+})
+
+await test('an html preview enlarges into a dialog that shows the whole document', async () => {
+  const { env } = mount(conversationFixture([
+    { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) },
+  ]))
+  eq(env.document.querySelector('dialog'), null, 'no dialog until asked')
+
+  click(expandButton(env.document))
+  const dialog = env.document.querySelector('dialog')
+  assert(dialog !== null, 'a dialog was opened')
+  eq(dialog.open, true, 'it is a modal, which is what lifts it into the top layer')
+  // `parentNode`, not `parentElement`: the shim has no `parentElement`, and a
+  // test that quietly reads `undefined.tagName` fails on the wrong thing.
+  eq(dialog.parentNode?.tagName, 'BODY', 'it lives on the body, not inside the recycled block')
+
+  const big = dialog.querySelector('iframe')
+  assert(big !== null, 'the enlarged frame is there')
+  // A short document is shown at its own height, not stretched to fill the
+  // dialog: the dialog has a max-height but no height, so it shrinks to its
+  // content and there is no empty band anywhere.
+  const shortHeight = Number(big.style.height.replace('px', ''))
+  assert(shortHeight > 0 && shortHeight < 400, `a short document keeps its own height, got ${big.style.height}`)
+  eq(dialog.querySelector('[data-dvk-modal-close]') !== null, true, 'there is a close control')
+  await tick()
+})
+
+await test('the enlarged dialog is capped by the viewport, not by maxPreviewHeight', () => {
+  // The whole reason the dialog exists: a long report must not be squeezed into
+  // the 320px the inline view uses. The cap is 86% of the viewport, so on the
+  // shim's 900px window it is 774px — comfortably more than 320, and derived
+  // from the window rather than hard-coded.
+  const long = `<body>${'<p>line of report text</p>'.repeat(400)}</body>`
+  const { env } = mount(conversationFixture([
+    { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: long }) },
+  ]))
+
+  click(expandButton(env.document))
+  const big = env.document.querySelector('dialog iframe')
+  const height = Number(big.style.height.replace('px', ''))
+  eq(height, Math.round(900 * 0.86), 'the frame took the viewport share')
+  assert(height > 320, 'which is much more room than the inline preview gets')
+
+  // And a different window gives a different answer, which is the property a
+  // pixel constant would fail.
+  env.document.defaultView.innerHeight = 1600
+  click(expandButton(env.document))
+  eq(env.document.querySelector('dialog'), null, 'toggling closed the first dialog')
+  click(expandButton(env.document))
+  eq(
+    Number(env.document.querySelector('dialog iframe').style.height.replace('px', '')),
+    Math.round(1600 * 0.86),
+    'a taller window enlarges further',
+  )
+})
+
+await test('the enlarged dialog never grants more than the inline frame does', () => {
+  // Both are opaque-origin sandboxes. The enlarged one still needs
+  // `allow-scripts` for the measuring script under the default mode, and the
+  // same nonce policy refuses the model's own scripts — the two layers are
+  // independent there too, so widening the dialog cannot widen the preview.
+  const { env } = mount(conversationFixture([
+    { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) },
+  ]))
+  click(expandButton(env.document))
+  const big = env.document.querySelector('dialog iframe')
+  eq(big.getAttribute('sandbox'), 'allow-scripts', 'scripts only, same-origin still withheld')
+  assert(big.srcdoc.includes('Content-Security-Policy'), 'the nonce policy is there too')
+  assert(!big.srcdoc.includes('allow-same-origin'), 'and same-origin is nowhere in it')
+})
+
+await test('closing the enlarged dialog leaves the conversation exactly as it was', async () => {
+  const { env, seam } = mount(conversationFixture([
+    { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) },
+  ]))
+  click(expandButton(env.document))
+  eq(env.document.querySelector('dialog') !== null, true, 'open')
+  click(env.document.querySelector('[data-dvk-modal-close]'))
+  eq(env.document.querySelector('dialog'), null, 'the node is gone')
+  eq(env.document.openDialogs, 0, 'and the top layer was released, so the page is interactive again')
+  // The inline preview is untouched by the dialog's whole lifecycle.
+  assert(env.document.querySelector('iframe') !== null, 'the inline frame is still mounted')
+  eq(env.document.querySelectorAll('iframe').length, 1, 'and no second frame was left behind')
+
+  // And disposing the block closes an open dialog rather than orphaning it over
+  // the whole app — the virtualised conversation removes nodes without warning.
+  click(expandButton(env.document))
+  eq(env.document.querySelector('dialog') !== null, true, 'open again')
+  block(env.document).remove()
+  // Removal is discovered by the seam's MutationObserver, so it is not
+  // synchronous; without this tick the assertion below would be testing the
+  // wrong moment and would pass for the wrong reason if the code regressed.
+  await tick()
+  eq(env.document.querySelector('dialog'), null, 'a removed block does not leave a dialog behind')
+  eq(env.document.openDialogs, 0, 'nor leave the page inert')
+})
+
+await test('the enlarge control is a sibling of the view switch, not one of its views', () => {
+  // The switcher's children are the views and existing assertions index them by
+  // position. An action masquerading as a third view would change what
+  // `children[2]` means to all of them.
+  const table = createTableRenderer((_key, fallback) => fallback)
+  const { env } = mount(conversationFixture([
+    { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'csv', code: tallCsv(400) }) },
+  ]), { renderers: [table] })
+  const sw = switcher(env.document)
+  eq(sw.children.map((b) => b.getAttribute('data-dvk-view')), ['table', 'code'], 'the switch still holds exactly the views')
+  eq(sw.querySelector('[data-dvk-action="expand"]'), null, 'the control is not inside the switch')
+  assert(expandButton(env.document) !== null, 'it is next to it in the banner')
+})
+
+await test('a renderer with nothing to enlarge grows no control at all', () => {
+  // A button that does nothing is worse than no button.
+  const { env } = mount(conversationFixture([
+    { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) },
+  ]))
+  click(switcher(env.document).children[1])
+  eq(expandButton(env.document), null, 'no control while the source is showing')
+  assert(expandButton(env.document) === null || expandButton(env.document).getAttribute('aria-pressed') === 'false',
+    'and it never claims to be pressed')
+})
+
+// ---------------------------------------------------------------------------
 // the built bundle, activated against a STRICT client context
 //
 // This section exists because of a shipped crash. A permissive `ctx` stub let
@@ -1804,7 +2029,7 @@ await test('the shipped patch documents every option, generated from the schema'
   for (const [key, value] of Object.entries(SCHEMA_DEFAULTS)) {
     assert(patch.includes(`        ${key}: ${JSON.stringify(value)}`), `cordis.patch.yml is missing "${key}"`)
   }
-  eq(Object.keys(SCHEMA_DEFAULTS).length, 8, 'eight options, and the patch documents exactly those')
+  eq(Object.keys(SCHEMA_DEFAULTS).length, 9, 'nine options, and the patch documents exactly those')
   eq(require$schema['~standard'].validate({}).issues, undefined, 'an empty config is valid')
   const bad = require$schema['~standard'].validate({ maxPreviewHeight: 'tall' })
   assert(Array.isArray(bad.issues) && bad.issues.length > 0, 'a bad value is an issue, not a value')

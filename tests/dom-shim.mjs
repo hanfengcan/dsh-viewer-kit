@@ -383,6 +383,11 @@ class ShimWindow {
     this.document = document
     /** @type {Map<string, Set<(event: object) => void>>} */
     this.listeners = new Map()
+    // The enlarged preview sizes its cap as a share of the viewport. Without a
+    // number here every such test would take the renderer's fallback branch and
+    // pass without exercising the thing it claims to check.
+    this.innerHeight = 900
+    this.innerWidth = 1440
   }
 
   /** @param {string} type @param {(event: object) => void} listener */
@@ -413,7 +418,38 @@ class ShimWindow {
   }
 }
 
-class ShimDocument {  constructor() {
+/**
+ * Give a `<dialog>` the three members the plugin uses.
+ *
+ * `showModal` is what puts the element in the browser's top layer, which is the
+ * reason the enlarged preview is a dialog rather than a `position: fixed`
+ * overlay — a fixed element is positioned against its nearest ancestor that
+ * creates a containing block. The shim records the open state so a test can
+ * assert that closing really released it, which is the part a plain DOM shim
+ * would otherwise let pass silently.
+ *
+ * @param {ShimElement} element
+ * @param {ShimDocument} doc
+ */
+function attachDialog(element, doc) {
+  element.open = false
+  element.showModal = function showModal() {
+    if (element.open === true) return
+    element.open = true
+    // A real modal dialog makes the rest of the document inert. Recording it
+    // lets a test notice if the plugin ever tried to keep the page interactive
+    // behind its own dialog, which it must not.
+    doc.openDialogs = (doc.openDialogs ?? 0) + 1
+  }
+  element.close = function close() {
+    if (element.open !== true) return
+    element.open = false
+    doc.openDialogs = Math.max(0, (doc.openDialogs ?? 1) - 1)
+  }
+}
+
+class ShimDocument {
+  constructor() {
     // Initialised before any child is attached: `appendChild` records, and the
     // constructor itself appends.
     /** @type {Array<{ target: ShimElement, observer: ShimMutationObserver }>} */
@@ -433,10 +469,12 @@ class ShimDocument {  constructor() {
 
   createElement(tagName) {
     const element = new ShimElement(tagName, this)
+    const tag = String(tagName).toLowerCase()
     // A real iframe has a browsing context, and the HTML renderer identifies the
     // sender of a measurement by comparing `event.source` against it. Without
     // one here, the postMessage path could not be driven in Node at all.
-    if (String(tagName).toLowerCase() === 'iframe') element.contentWindow = { frame: element }
+    if (tag === 'iframe') element.contentWindow = { frame: element }
+    if (tag === 'dialog') attachDialog(element, this)
     return element
   }
 

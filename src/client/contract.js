@@ -42,7 +42,7 @@
  *   view root. The root is empty on every `enter` that needs a fresh view, so
  *   a renderer never has to think about tearing down its own container.
  * @property {() => void} clearView Empty the surface's view root.
- * @property {{ maxSourceBytes: number, maxPreviewHeight: number }} limits
+ * @property {{ maxSourceBytes: number, maxPreviewHeight: number, maxTableHeight: number }} limits
  * @property {(error: unknown) => void} fail Report a fatal render error; the
  *   host degrades to the native code block.
  * @property {() => Readonly<ViewerKitConfig>} config
@@ -65,6 +65,24 @@
  *   enhanced view.
  * @property {(viewId: string) => void | Promise<void>} enter
  * @property {() => void} dispose
+ * @property {Expandable} [expand] Optional. Present only when this view can be
+ *   shown without a cramped inner scrollbar, which is how the host knows to add
+ *   the expand button. Omit it and no button appears — a renderer with nothing
+ *   to offer stays silent rather than growing a dead control.
+ */
+
+/**
+ * The enlarge affordance, kept as its own shape because the host only ever needs
+ * three things from it: whether to draw a button, what pressing it does, and
+ * whether it is currently pressed.
+ *
+ * `isOn` exists so a toggle can report state. A table lifting its own cap and an
+ * HTML preview opening a dialog are different actions, but both answer the same
+ * question to the button that drives them.
+ *
+ * @typedef {object} Expandable
+ * @property {() => void} toggle
+ * @property {() => boolean} isOn
  */
 
 /**
@@ -114,6 +132,9 @@
  *   genuinely exceeds the cap); `fit` estimates that height without a measuring
  *   frame; `fixed` gives every document `maxPreviewHeight`. **`measure` by
  *   default**, falling back to `fit` if no measurement arrives.
+ * @property {number} [maxTableHeight] Tallest a data table may grow before it
+ *   scrolls internally, in CSS pixels. The wrap carries a sticky header, so a
+ *   long result stays readable in place instead of stretching the conversation.
  * @property {number} [chartHeight] Height of an embedded chart, in CSS pixels.
  *   Charts need a definite height; a canvas in an auto-height box renders at
  *   zero.

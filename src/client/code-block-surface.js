@@ -148,6 +148,48 @@ export function createCodeBlockSurface(options) {
   switchHost.appendChild(switcher)
   content.appendChild(viewRoot)
 
+  // --- the expand button ----------------------------------------------------
+  //
+  // A sibling of the switcher, not a third child of it. The switcher's children
+  // are the view buttons and existing assertions index them by position; an
+  // action that is not a view would silently change what `children[1]` is.
+  //
+  // It appears and disappears with `enter`, because whether enlarging makes
+  // sense depends on what is on screen: lifting a table's height cap is
+  // meaningless while its source is showing, and offering a button that does
+  // nothing is worse than not offering one.
+  /** @type {HTMLElement | null} */
+  let expandControl = null
+
+  const syncExpandControl = (activeViewId) => {
+    // The built-in code view mounts nothing, so there is nothing to enlarge.
+    const expandable = activeViewId === 'code' ? undefined : instance?.expand
+    if (expandable === undefined || typeof expandable.toggle !== 'function') {
+      expandControl?.remove()
+      expandControl = null
+      return
+    }
+    if (expandControl === null) {
+      const button = /** @type {HTMLButtonElement} */ (doc.createElement('button'))
+      button.type = 'button'
+      button.className = 'dvk-switch__item dvk-expand'
+      button.setAttribute('data-dvk-action', 'expand')
+      button.setAttribute('aria-pressed', 'false')
+      button.addEventListener('click', () => {
+        try {
+          instance?.expand?.toggle()
+        } catch (error) {
+          host.fail(error)
+        }
+        syncExpandControl(current)
+      })
+      switchHost.appendChild(button)
+      expandControl = button
+    }
+    expandControl.setAttribute('aria-pressed', String(instance?.expand?.isOn?.() === true))
+    expandControl.textContent = t('expand.label', 'Enlarge')
+  }
+
   // --- state ----------------------------------------------------------------
   let disposed = false
   let current = ''
@@ -199,6 +241,8 @@ export function createCodeBlockSurface(options) {
     } catch (error) {
       host.fail(error)
     }
+    // After `enter`, so `instance.expand` reflects the view that just mounted.
+    syncExpandControl(viewId)
   }
 
   // Enter once so a block that opens in preview is already live.
@@ -220,6 +264,9 @@ export function createCodeBlockSurface(options) {
       // Invariant 5: remove exactly what we added, and nothing else.
       viewRoot.remove()
       switcher.remove()
+      // The expand button is a sibling of the switcher in the banner, not a
+      // child of the switcher, so removing the switcher does not take it.
+      expandControl?.remove()
       content.removeAttribute(MODE_ATTRIBUTE)
     },
   }

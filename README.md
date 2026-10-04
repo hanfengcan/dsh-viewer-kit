@@ -15,8 +15,8 @@
 
 | 围栏 | 切换 | 渲染结果是怎么来的 |
 |---|---|---|
-| `html` `svg` | 预览 / 代码 | 沙箱 iframe 真实渲染，默认禁脚本 |
-| `csv` `tsv` | 表格 / 代码 | 自己实现 RFC 4180 解析，DOM 建表（不解析标记） |
+| `html` `svg` | 预览 / 代码 | 沙箱 iframe 真实渲染，默认禁脚本；可**放大**成弹窗看全文 |
+| `csv` `tsv` | 表格 / 代码 | 自己实现 RFC 4180 解析，DOM 建表（不解析标记）；表头吸顶 |
 | `json` | 表格 / 代码 | 只认**对象数组**；对象不是表 |
 | `markdown` | 表格 / 代码 | 只认**整个围栏就是一张管道表**，否则原样 |
 | `echarts` `chart` | 图表 / 代码 | 模型只写 option 的 JSON，引擎按需加载 |
@@ -24,6 +24,31 @@
 
 **只作用于「会话」标签页。** 轨迹标签页也渲染 `.md-code-block`，但它的 DOM 不带任何
 `data-chat-*` 属性而会话区带 —— 边界建在这个实测差异上，不需要知道 shell 如何组织标签页。
+
+### 高度与「看全内容」
+
+三个渲染器里**只有两个物理上必须封顶**，因为它们的内容高度无法从 DOM 推出：
+
+| 渲染器 | 封顶 | 为什么必须 |
+|---|---|---|
+| `html` | `maxPreviewHeight` 320 | `<iframe>` 是替换元素，高度**永不来自内部文档**；`max-height` 只能限制默认的 150px。只能测出来再封顶 |
+| `echarts` | `chartHeight` 360 | canvas 在 auto 高度盒子里渲染成 **0** 高 |
+| `table` | `maxTableHeight` 480 | **不是必须** —— 表格能自然撑开。封顶是为了不把对话拉长 |
+
+**每个被认领的块都带一个「放大」按钮，行为由渲染器自己决定：**
+
+- **表格**：就地取消高度封顶，整张表在对话里展开。再点一次恢复。
+- **HTML 预览**：开一个 **`<dialog>` 弹窗**，高度按视口的 86% 算，内容按真实高度撑开。
+  短文档无滚动条、无留白；长文档只在物理上装不下时才出现滚动条。
+
+弹窗**不是**手写的 `position: fixed` 蒙层，而是 `showModal()` —— 浏览器把它提到
+**top layer**，这是唯一能绕开包含块的办法（`fixed` 元素是相对**最近创建包含块的祖先**
+定位的，而本插件自己的 `.dvk-chart { contain: content }` 就已经是一个包含块）。
+顺带白拿背景遮罩、ESC 关闭和焦点陷阱。弹窗挂在 `document.body` 上而不是块里 ——
+会话是虚拟化的，块可能在弹窗还开着的时候被回收。
+
+> **封顶和放大必须成对。** 只封顶不给出路，等于拿掉"一眼看全 500 行"的能力 ——
+> 而那恰恰是没有封顶时唯一能看到全部的方式。
 
 > **`echarts` 围栏不需要写 HTML。** 只写 ECharts 的 option JSON 就够了，不用引 CDN、
 > 不用 `<script>`、也不需要打开 `htmlAllowScripts` —— 引擎是插件自己按需加载的代码。
@@ -75,6 +100,7 @@
 | `defaultToPreview` | `true` | 认领到的块默认打开**渲染结果**而不是源码 |
 | `previewHeightMode` | `measure` | HTML 预览高度怎么定 —— 见下 |
 | `maxPreviewHeight` | `320` | `measure`/`fit` 下是**上限**，`fixed` 下就是**框高** |
+| `maxTableHeight` | `480` | 表格超过这个高度就开始**框内滚动**，表头吸顶 |
 | `chartHeight` | `360` | 图表高度。必须 > 0，否则画布渲染成 0 高 |
 | `htmlAllowScripts` | `false` | 允许预览里的 HTML 执行**它自己的**脚本 |
 | `maxSourceBytes` | `262144` | 超过这个大小的源码保持原生代码块 |
@@ -257,7 +283,7 @@ __DSH_VIEWER_KIT__.diagnose()
 
 ```powershell
 pnpm install
-pnpm run check        # 类型检查 → 构建 → 109 项测试 → 产物激活复现 → 宿主契约探针
+pnpm run check        # 类型检查 → 构建 → 120 项测试 → 产物激活复现 → 宿主契约探针
 pnpm run release      # check + 打包自检，完整发布门禁
 ```
 
@@ -353,7 +379,7 @@ src/client/
   renderers/           L5 渲染器：echarts / html / table
 src/index.js           Host 半体（仅作为 Loader 行的锚点）
 client/                ★ 构建产物，提交进库（见下）
-tests/                 109 项测试 + 探针负向测试 + DOM 垫片 + 从 DSH 真实产物抄来的夹具
+tests/                 120 项测试 + 探针负向测试 + DOM 垫片 + 从 DSH 真实产物抄来的夹具
 tools/                 宿主契约探针（读 app.asar）+ 发布前自检
 docs/                  架构设计 / 渲染器作者指南
 tsdown.config.ts       ★ 客户端 bundle 的构建契约（模块格式与 chunk 规则在这里定义）
@@ -364,7 +390,7 @@ tsdown.config.ts       ★ 客户端 bundle 的构建契约（模块格式与 ch
 > **构建产物是提交进版本库的**，这与"不提交产物"的常规做法相反，是有意的：本仓库就是被
 > `pnpm add file:<path>` 安装的那一份，而 DSH 激活时会直接 `readFileSync` 这个 bundle，
 > 缺文件会抛 `MissingClientBundleError` 并让 entry 激活失败。提交它们，新克隆的树才开箱可装
-> —— **这一条实测过：`git clone` 后不装任何依赖，109 项测试全绿。**
+> —— **这一条实测过：`git clone` 后不装任何依赖，120 项测试全绿。**
 > 改完源码务必重新 `pnpm run build` 再提交。
 
 > **tarball 只装必需的东西。** `package.json` 的 `files` 只有 `lib/ client/

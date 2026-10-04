@@ -107,15 +107,21 @@ export const STYLES = `
 }
 
 /* Data table view. Rendered from DOM calls, so it inherits the host font and
-   needs no sandbox; the caps that keep a pathological payload from stretching
-   the conversation live in renderers/table.js, not here. */
+   needs no sandbox.
+
+   The height cap is written inline by renderers/table.js from the
+   maxTableHeight config, deliberately NOT here: a constant in this file
+   would be a second copy of the default, and a second copy is how this rule
+   used to read 'max-height: inherit' and cap nothing at all. 'inherit' took
+   the parent '.dvk-view', which sets only padding, so it computed to 'none'
+   and the wrap never scrolled — which also meant the sticky header below had
+   no bounded scrollport to stick to, and did nothing either. */
 .dvk-table-summary {
   margin: 0 0 8px;
   color: var(--dsw-alias-label-tertiary, #888);
   font: 11px/18px var(--dsw-font-family, system-ui, sans-serif);
 }
 .dvk-table-wrap {
-  max-height: inherit;
   overflow: auto;
 }
 .dvk-table {
@@ -158,6 +164,74 @@ export const STYLES = `
   padding: 12px 2px;
   color: var(--dsw-alias-label-tertiary, #888);
   font: 11px/18px var(--dsw-font-family, system-ui, sans-serif);
+}
+
+/* Enlarged preview.
+
+   A <dialog> shown with showModal() is in the browser's top layer, which is
+   the whole reason this is not a hand-built 'position: fixed' overlay: a fixed
+   element is positioned against its nearest ancestor that creates a containing
+   block, and '.dvk-chart { contain: content }' above already does exactly
+   that. The top layer escapes ancestor stacking and containing blocks by
+   specification, and brings the backdrop, ESC and a focus trap with it.
+
+   Sizing is a viewport share, set by renderers/html.js, not a pixel constant
+   here — the same reasoning as maxTableHeight. */
+.dvk-modal {
+  padding: 0;
+  border: 0;
+  border-radius: var(--dsw-radius-md, 10px);
+  background: var(--dsw-alias-bg-base, #fff);
+  color: var(--dsw-alias-text-primary, #111);
+  /* 86% of the viewport: room for the title bar and a strip of the page behind,
+     so it reads as an overlay rather than a takeover. */
+  width: min(1180px, 94vw);
+  max-width: 94vw;
+  max-height: 86vh;
+  overflow: hidden;
+}
+.dvk-modal::backdrop {
+  background: rgb(0 0 0 / 45%);
+}
+.dvk-modal__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px 8px 14px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.2));
+  font: 12px/20px var(--dsw-font-family, system-ui, sans-serif);
+}
+.dvk-modal__title {
+  color: var(--dsw-alias-label-secondary, #555);
+  font-weight: 600;
+}
+.dvk-modal__close {
+  appearance: none;
+  border: 0;
+  border-radius: var(--dsw-radius-sm, 6px);
+  padding: 2px 8px;
+  font: 12px/20px var(--dsw-font-family, system-ui, sans-serif);
+  color: var(--dsw-alias-label-secondary, #555);
+  background: transparent;
+  cursor: pointer;
+}
+.dvk-modal__close:hover {
+  color: var(--dsw-alias-label-primary, #111);
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.12));
+}
+.dvk-modal__close:focus-visible {
+  outline: 1px solid var(--dsw-alias-state-business-primary, #4a7dff);
+  outline-offset: 1px;
+}
+.dvk-modal__frame {
+  display: block;
+  width: 100%;
+  border: 0;
+  /* The height is set inline from the measurement; this only keeps a frame
+     that has not been measured yet from collapsing to zero. */
+  min-height: 120px;
+  background: var(--dsw-alias-bg-base, #fff);
 }
 `
 

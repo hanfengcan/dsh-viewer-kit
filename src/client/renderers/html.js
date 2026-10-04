@@ -16,6 +16,16 @@
 /** @type {Readonly<Record<string, string>>} */
 const LANGS = Object.freeze({ html: 'HTML', svg: 'SVG' })
 
+/**
+ * How much of the viewport height an enlarged preview may occupy.
+ *
+ * 0.86 leaves room for the dialog's own title bar plus a strip of the page
+ * behind it, so the reader can still see they are inside a conversation. It is
+ * a share of the viewport rather than a pixel count because a fixed number is
+ * wrong on every screen but the one it was chosen on.
+ */
+const DIALOG_VIEWPORT_FRACTION = 0.86
+
 /** A `<meta charset>` is prepended unless the document declares one. */
 function withCharset(source) {
   if (/<meta[^>]+charset\s*=/i.test(source)) return source
@@ -315,8 +325,148 @@ export function createHtmlRenderer(t) {
         }
       }
 
+      /**
+       * The enlarged view, or null when it is closed.
+       *
+       * @type {HTMLDialogElement | null}
+       */
+      let dialog = null
+      /** @type {HTMLIFrameElement | null} */
+      let dialogFrame = null
+      /** @type {(() => void) | null} */
+      let releaseDialogListener = null
+
+      /**
+       * The cap an enlarged frame is measured against.
+       *
+       * Derived from the viewport rather than from `maxPreviewHeight`, because
+       * the whole point of the enlarged view is to stop the content being
+       * squeezed into 320px. 86% leaves room for the title bar and the page
+       * behind it, so the dialog reads as an overlay rather than as a takeover.
+       *
+       * @returns {number}
+       */
+      const dialogCap = () => {
+        const viewport = /** @type {any} */ (view).innerHeight
+        const pixels = Number(viewport)
+        // `innerHeight` is 0 in a headless shim and absent on odd hosts; fall
+        // back to a tall-but-finite number rather than dividing the document
+        // by zero or producing a zero-height frame.
+        if (!Number.isFinite(pixels) || pixels <= 0) return 1600
+        return Math.round(pixels * DIALOG_VIEWPORT_FRACTION)
+      }
+
+      const closeDialog = () => {
+        releaseDialogListener?.()
+        releaseDialogListener = null
+        dialogFrame = null
+        const open = dialog
+        // Cleared first so a re-entrant call (a `close` event firing a handler
+        // that closes again) is a no-op rather than a double remove.
+        dialog = null
+        if (open === null) return
+        try {
+          // Release the top layer first. Removing a still-open <dialog> node
+          // leaves it registered as a modal in some hosts, and the page behind
+          // stays inert — which looks like the app froze.
+          open.close?.()
+        } catch {
+          /* ignore */
+        }
+        try {
+          // Dropping the node drops the browsing context, which is what
+          // actually stops any timer or animation the enlarged document began.
+          open.remove()
+        } catch {
+          /* ignore */
+        }
+      }
+
+      const openDialog = () => {
+        if (dialog !== null) return
+        dialog = doc.createElement('dialog')
+        dialog.className = 'dvk-modal'
+        dialog.setAttribute('data-dvk-modal', 'true')
+        // No `aria-modal` on a <dialog>: the element already has the role, and
+        // adding it by hand is how a dialog ends up announced twice.
+        dialog.setAttribute('aria-label', t('html.modalTitle', 'HTML preview'))
+
+        const bar = doc.createElement('div')
+        bar.className = 'dvk-modal__bar'
+
+        const title = doc.createElement('span')
+        title.className = 'dvk-modal__title'
+        title.textContent = t('html.modalTitle', 'HTML preview')
+        bar.appendChild(title)
+
+        const close = doc.createElement('button')
+        close.type = 'button'
+        close.className = 'dvk-modal__close'
+        close.setAttribute('data-dvk-modal-close', 'true')
+        close.setAttribute('aria-label', t('html.modalClose', 'Close'))
+        close.textContent = '✕'
+        close.addEventListener('click', closeDialog)
+        bar.appendChild(close)
+
+        dialogFrame = doc.createElement('iframe')
+        dialogFrame.className = 'dvk-modal__frame'
+        dialogFrame.title = t('html.frameTitle', 'HTML preview')
+        dialogFrame.setAttribute('referrerpolicy', 'no-referrer')
+        // The same two layers as the inline frame, in the same order: opaque
+        // origin always, and — because the enlarged frame is measured — a
+        // policy that authorises the measuring script and nothing else. The
+        // model's own scripts are refused here exactly as they are inline.
+        dialogFrame.setAttribute('sandbox', config.previewHeightMode === 'measure' ? 'allow-scripts' : config.htmlAllowScripts ? 'allow-scripts' : '')
+        const cap = dialogCap()
+        dialogFrame.style.height = `${Math.min(cap, estimateHeight(request.source, cap))}px`
+        dialogFrame.srcdoc =
+          config.previewHeightMode === 'measure'
+            ? buildMeasuredDocument(request.source, frameId, nonce, config.htmlAllowScripts)
+            : withCharset(request.source)
+
+        dialog.appendChild(bar)
+        dialog.appendChild(dialogFrame)
+
+        // `document.body`, NOT the block's view root. Two reasons, both
+        // load-bearing: the view root is emptied on every view switch, and the
+        // conversation is virtualised, so a node inside a message can be
+        // removed while the reader is still looking at the enlarged document.
+        doc.body.appendChild(dialog)
+
+        // Measuring reports through the same channel the inline frame uses, so
+        // the handler is the same function with a different target.
+        const onModalMessage = (event) => {
+          if (dialogFrame === null) return
+          if (event.source !== dialogFrame.contentWindow) return
+          const data = /** @type {any} */ (event.data)
+          if (data == null || data.__dvk !== 'height' || data.id !== frameId) return
+          const height = Number(data.height)
+          if (!Number.isFinite(height) || height <= 0) return
+          dialogFrame.style.height = `${Math.min(cap, Math.ceil(height))}px`
+        }
+        view.addEventListener?.('message', onModalMessage)
+        releaseDialogListener = () => view.removeEventListener?.('message', onModalMessage)
+
+        // `showModal()` puts the element in the browser's **top layer**, which
+        // is the only reason a hand-built overlay was not needed: a
+        // `position: fixed` element is positioned against its nearest ancestor
+        // that creates a containing block, and this plugin's own
+        // `.dvk-chart { contain: content }` already does that. The top layer
+        // escapes ancestor stacking and containing blocks by specification.
+        // It also brings the backdrop, the ESC key and a focus trap for free.
+        if (typeof dialog.showModal === 'function') dialog.showModal()
+      }
+
       return {
         views: [{ id: 'preview', label: LANGS[request.lang] ?? 'Preview' }],
+
+        expand: {
+          toggle: () => {
+            if (dialog === null) openDialog()
+            else closeDialog()
+          },
+          isOn: () => dialog !== null,
+        },
 
         enter(viewId) {
           if (viewId === 'code') {
@@ -327,6 +477,11 @@ export function createHtmlRenderer(t) {
         },
 
         dispose() {
+          // The dialog is not a child of the view root — it cannot be, because
+          // the view root is emptied on every view switch — so this is the only
+          // thing standing between a scrolled-away block and a dialog left
+          // covering the whole app.
+          closeDialog()
           destroyFrame()
         },
       }

@@ -260,7 +260,7 @@ export function createTableRenderer(t) {
     },
 
     create(host) {
-      const { request, document: doc, mount } = host
+      const { request, limits, document: doc, mount } = host
       const table = readTable(request.lang, request.source)
       if (table === null) return null
 
@@ -269,14 +269,62 @@ export function createTableRenderer(t) {
       const hiddenColumns = table.header.length - columns.length
       const hiddenRows = table.rows.length - rows.length
 
+      /**
+       * Whether the height cap is currently lifted.
+       *
+       * Own state rather than something read back off the DOM: `enter()` clears
+       * the view root on every view switch, so a flag living only in the
+       * markup would be lost the moment the user toggled to code and back.
+       */
+      let expanded = false
+
+      /**
+       * This instance's own wrap, so `expand` restyles the right one.
+       *
+       * A `document.querySelector` here would find whichever table came first
+       * in the document — including another conversation block's — so pressing
+       * expand in one block could restyle a different block's table.
+       */
+      /** @type {HTMLElement | null} */
+      let wrap = null
+
+      /** Apply or lift the cap on our wrap. */
+      const applyCap = () => {
+        if (wrap === null) return
+        // Inline rather than a stylesheet rule, because the cap is user
+        // configuration: a constant in CSS is a second copy of the default, and
+        // a second copy is how the previous `max-height: inherit` ended up
+        // silently inert.
+        if (expanded) wrap.style.maxHeight = ''
+        else wrap.style.maxHeight = `${limits.maxTableHeight}px`
+      }
+
       return {
         views: [{ id: 'table', label: t('view.table', 'Table') }],
 
+        expand: {
+          toggle() {
+            expanded = !expanded
+            // The wrap is cleared on every `enter`, so a toggle pressed while
+            // the code view is showing has nothing to restyle; the next
+            // `enter` reads the new state.
+            applyCap()
+          },
+          isOn: () => expanded,
+        },
+
         enter(viewId) {
-          if (viewId === 'code') return
+          if (viewId === 'code') {
+            wrap = null
+            return
+          }
 
           const root = doc.createElement('div')
           root.className = 'dvk-table-wrap'
+          wrap = root
+          // Before the children exist, so the first paint is already capped
+          // and a long table never reflows from 13,000px down to the cap.
+          applyCap()
 
           const summary = doc.createElement('p')
           summary.className = 'dvk-table-summary'
@@ -324,7 +372,9 @@ export function createTableRenderer(t) {
           mount(root)
         },
 
-        dispose() {},
+        dispose() {
+          wrap = null
+        },
       }
     },
   }

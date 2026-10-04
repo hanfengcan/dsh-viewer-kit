@@ -133,7 +133,7 @@ const SWITCH_ATTRIBUTE = "data-dvk-switch";
 *   view root. The root is empty on every `enter` that needs a fresh view, so
 *   a renderer never has to think about tearing down its own container.
 * @property {() => void} clearView Empty the surface's view root.
-* @property {{ maxSourceBytes: number, maxPreviewHeight: number }} limits
+* @property {{ maxSourceBytes: number, maxPreviewHeight: number, maxTableHeight: number }} limits
 * @property {(error: unknown) => void} fail Report a fatal render error; the
 *   host degrades to the native code block.
 * @property {() => Readonly<ViewerKitConfig>} config
@@ -154,6 +154,23 @@ const SWITCH_ATTRIBUTE = "data-dvk-switch";
 *   enhanced view.
 * @property {(viewId: string) => void | Promise<void>} enter
 * @property {() => void} dispose
+* @property {Expandable} [expand] Optional. Present only when this view can be
+*   shown without a cramped inner scrollbar, which is how the host knows to add
+*   the expand button. Omit it and no button appears — a renderer with nothing
+*   to offer stays silent rather than growing a dead control.
+*/
+/**
+* The enlarge affordance, kept as its own shape because the host only ever needs
+* three things from it: whether to draw a button, what pressing it does, and
+* whether it is currently pressed.
+*
+* `isOn` exists so a toggle can report state. A table lifting its own cap and an
+* HTML preview opening a dialog are different actions, but both answer the same
+* question to the button that drives them.
+*
+* @typedef {object} Expandable
+* @property {() => void} toggle
+* @property {() => boolean} isOn
 */
 /**
 * The contract every renderer implements. Adding a renderer means adding a
@@ -201,6 +218,9 @@ const SWITCH_ATTRIBUTE = "data-dvk-switch";
 *   genuinely exceeds the cap); `fit` estimates that height without a measuring
 *   frame; `fixed` gives every document `maxPreviewHeight`. **`measure` by
 *   default**, falling back to `fit` if no measurement arrives.
+* @property {number} [maxTableHeight] Tallest a data table may grow before it
+*   scrolls internally, in CSS pixels. The wrap carries a sticky header, so a
+*   long result stays readable in place instead of stretching the conversation.
 * @property {number} [chartHeight] Height of an embedded chart, in CSS pixels.
 *   Charts need a definite height; a canvas in an auto-height box renders at
 *   zero.
@@ -416,6 +436,35 @@ function createCodeBlockSurface(options) {
 	}
 	switchHost.appendChild(switcher);
 	content.appendChild(viewRoot);
+	/** @type {HTMLElement | null} */
+	let expandControl = null;
+	const syncExpandControl = (activeViewId) => {
+		const expandable = activeViewId === "code" ? void 0 : instance?.expand;
+		if (expandable === void 0 || typeof expandable.toggle !== "function") {
+			expandControl?.remove();
+			expandControl = null;
+			return;
+		}
+		if (expandControl === null) {
+			const button = doc.createElement("button");
+			button.type = "button";
+			button.className = "dvk-switch__item dvk-expand";
+			button.setAttribute("data-dvk-action", "expand");
+			button.setAttribute("aria-pressed", "false");
+			button.addEventListener("click", () => {
+				try {
+					instance?.expand?.toggle();
+				} catch (error) {
+					host.fail(error);
+				}
+				syncExpandControl(current);
+			});
+			switchHost.appendChild(button);
+			expandControl = button;
+		}
+		expandControl.setAttribute("aria-pressed", String(instance?.expand?.isOn?.() === true));
+		expandControl.textContent = t("expand.label", "Enlarge");
+	};
 	let disposed = false;
 	let current = "";
 	/**
@@ -456,6 +505,7 @@ function createCodeBlockSurface(options) {
 		} catch (error) {
 			host.fail(error);
 		}
+		syncExpandControl(viewId);
 	}
 	current = pickInitialView();
 	enter(current);
@@ -471,6 +521,7 @@ function createCodeBlockSurface(options) {
 			} catch {}
 			viewRoot.remove();
 			switcher.remove();
+			expandControl?.remove();
 			content.removeAttribute(MODE_ATTRIBUTE);
 		}
 	};
@@ -971,6 +1022,18 @@ const FIELDS = [
 		].join("\n")
 	},
 	{
+		key: "maxTableHeight",
+		kind: "positive",
+		fallback: 480,
+		doc: [
+			"Tallest a data table may grow, in CSS pixels, before it scrolls",
+			"internally. The table keeps a sticky header, so a long result is",
+			"readable in place instead of stretching the conversation. Expand a",
+			"table from its view switch to lift the cap; a chart or an HTML",
+			"preview is unaffected."
+		].join("\n")
+	},
+	{
 		key: "chartHeight",
 		kind: "positive",
 		fallback: 360,
@@ -1459,6 +1522,15 @@ const LANGS = Object.freeze({
 	html: "HTML",
 	svg: "SVG"
 });
+/**
+* How much of the viewport height an enlarged preview may occupy.
+*
+* 0.86 leaves room for the dialog's own title bar plus a strip of the page
+* behind it, so the reader can still see they are inside a conversation. It is
+* a share of the viewport rather than a pixel count because a fixed number is
+* wrong on every screen but the one it was chosen on.
+*/
+const DIALOG_VIEWPORT_FRACTION = .86;
 /** A `<meta charset>` is prepended unless the document declares one. */
 function withCharset(source) {
 	if (/<meta[^>]+charset\s*=/i.test(source)) return source;
@@ -1693,11 +1765,102 @@ function createHtmlRenderer(t) {
 					if (!measured && frame !== null) frame.style.height = `${estimated}px`;
 				}, 600);
 			};
+			/**
+			* The enlarged view, or null when it is closed.
+			*
+			* @type {HTMLDialogElement | null}
+			*/
+			let dialog = null;
+			/** @type {HTMLIFrameElement | null} */
+			let dialogFrame = null;
+			/** @type {(() => void) | null} */
+			let releaseDialogListener = null;
+			/**
+			* The cap an enlarged frame is measured against.
+			*
+			* Derived from the viewport rather than from `maxPreviewHeight`, because
+			* the whole point of the enlarged view is to stop the content being
+			* squeezed into 320px. 86% leaves room for the title bar and the page
+			* behind it, so the dialog reads as an overlay rather than as a takeover.
+			*
+			* @returns {number}
+			*/
+			const dialogCap = () => {
+				const viewport = view.innerHeight;
+				const pixels = Number(viewport);
+				if (!Number.isFinite(pixels) || pixels <= 0) return 1600;
+				return Math.round(pixels * DIALOG_VIEWPORT_FRACTION);
+			};
+			const closeDialog = () => {
+				releaseDialogListener?.();
+				releaseDialogListener = null;
+				dialogFrame = null;
+				const open = dialog;
+				dialog = null;
+				if (open === null) return;
+				try {
+					open.close?.();
+				} catch {}
+				try {
+					open.remove();
+				} catch {}
+			};
+			const openDialog = () => {
+				if (dialog !== null) return;
+				dialog = doc.createElement("dialog");
+				dialog.className = "dvk-modal";
+				dialog.setAttribute("data-dvk-modal", "true");
+				dialog.setAttribute("aria-label", t("html.modalTitle", "HTML preview"));
+				const bar = doc.createElement("div");
+				bar.className = "dvk-modal__bar";
+				const title = doc.createElement("span");
+				title.className = "dvk-modal__title";
+				title.textContent = t("html.modalTitle", "HTML preview");
+				bar.appendChild(title);
+				const close = doc.createElement("button");
+				close.type = "button";
+				close.className = "dvk-modal__close";
+				close.setAttribute("data-dvk-modal-close", "true");
+				close.setAttribute("aria-label", t("html.modalClose", "Close"));
+				close.textContent = "✕";
+				close.addEventListener("click", closeDialog);
+				bar.appendChild(close);
+				dialogFrame = doc.createElement("iframe");
+				dialogFrame.className = "dvk-modal__frame";
+				dialogFrame.title = t("html.frameTitle", "HTML preview");
+				dialogFrame.setAttribute("referrerpolicy", "no-referrer");
+				dialogFrame.setAttribute("sandbox", config.previewHeightMode === "measure" ? "allow-scripts" : config.htmlAllowScripts ? "allow-scripts" : "");
+				const cap = dialogCap();
+				dialogFrame.style.height = `${Math.min(cap, estimateHeight(request.source, cap))}px`;
+				dialogFrame.srcdoc = config.previewHeightMode === "measure" ? buildMeasuredDocument(request.source, frameId, nonce, config.htmlAllowScripts) : withCharset(request.source);
+				dialog.appendChild(bar);
+				dialog.appendChild(dialogFrame);
+				doc.body.appendChild(dialog);
+				const onModalMessage = (event) => {
+					if (dialogFrame === null) return;
+					if (event.source !== dialogFrame.contentWindow) return;
+					const data = event.data;
+					if (data == null || data.__dvk !== "height" || data.id !== frameId) return;
+					const height = Number(data.height);
+					if (!Number.isFinite(height) || height <= 0) return;
+					dialogFrame.style.height = `${Math.min(cap, Math.ceil(height))}px`;
+				};
+				view.addEventListener?.("message", onModalMessage);
+				releaseDialogListener = () => view.removeEventListener?.("message", onModalMessage);
+				if (typeof dialog.showModal === "function") dialog.showModal();
+			};
 			return {
 				views: [{
 					id: "preview",
 					label: LANGS[request.lang] ?? "Preview"
 				}],
+				expand: {
+					toggle: () => {
+						if (dialog === null) openDialog();
+						else closeDialog();
+					},
+					isOn: () => dialog !== null
+				},
 				enter(viewId) {
 					if (viewId === "code") {
 						destroyFrame();
@@ -1706,6 +1869,7 @@ function createHtmlRenderer(t) {
 					mountFrame();
 				},
 				dispose() {
+					closeDialog();
 					destroyFrame();
 				}
 			};
@@ -1981,7 +2145,8 @@ function createKit(options = {}) {
 				clearView: surface.clearView,
 				limits: {
 					maxSourceBytes: config.maxSourceBytes,
-					maxPreviewHeight: config.maxPreviewHeight
+					maxPreviewHeight: config.maxPreviewHeight,
+					maxTableHeight: config.maxTableHeight
 				},
 				fail,
 				config: () => config
@@ -2290,22 +2455,57 @@ function createTableRenderer(t) {
 			return false;
 		},
 		create(host) {
-			const { request, document: doc, mount } = host;
+			const { request, limits, document: doc, mount } = host;
 			const table = readTable(request.lang, request.source);
 			if (table === null) return null;
 			const columns = table.header.slice(0, MAX_COLUMNS);
 			const rows = table.rows.slice(0, MAX_ROWS);
 			const hiddenColumns = table.header.length - columns.length;
 			const hiddenRows = table.rows.length - rows.length;
+			/**
+			* Whether the height cap is currently lifted.
+			*
+			* Own state rather than something read back off the DOM: `enter()` clears
+			* the view root on every view switch, so a flag living only in the
+			* markup would be lost the moment the user toggled to code and back.
+			*/
+			let expanded = false;
+			/**
+			* This instance's own wrap, so `expand` restyles the right one.
+			*
+			* A `document.querySelector` here would find whichever table came first
+			* in the document — including another conversation block's — so pressing
+			* expand in one block could restyle a different block's table.
+			*/
+			/** @type {HTMLElement | null} */
+			let wrap = null;
+			/** Apply or lift the cap on our wrap. */
+			const applyCap = () => {
+				if (wrap === null) return;
+				if (expanded) wrap.style.maxHeight = "";
+				else wrap.style.maxHeight = `${limits.maxTableHeight}px`;
+			};
 			return {
 				views: [{
 					id: "table",
 					label: t("view.table", "Table")
 				}],
+				expand: {
+					toggle() {
+						expanded = !expanded;
+						applyCap();
+					},
+					isOn: () => expanded
+				},
 				enter(viewId) {
-					if (viewId === "code") return;
+					if (viewId === "code") {
+						wrap = null;
+						return;
+					}
 					const root = doc.createElement("div");
 					root.className = "dvk-table-wrap";
+					wrap = root;
+					applyCap();
 					const summary = doc.createElement("p");
 					summary.className = "dvk-table-summary";
 					summary.textContent = t("table.summary", "{rows} rows × {columns} columns").replace("{rows}", String(rows.length)).replace("{columns}", String(columns.length));
@@ -2342,7 +2542,9 @@ function createTableRenderer(t) {
 					}
 					mount(root);
 				},
-				dispose() {}
+				dispose() {
+					wrap = null;
+				}
 			};
 		}
 	};
@@ -2562,15 +2764,21 @@ const STYLES = `
 }
 
 /* Data table view. Rendered from DOM calls, so it inherits the host font and
-   needs no sandbox; the caps that keep a pathological payload from stretching
-   the conversation live in renderers/table.js, not here. */
+   needs no sandbox.
+
+   The height cap is written inline by renderers/table.js from the
+   maxTableHeight config, deliberately NOT here: a constant in this file
+   would be a second copy of the default, and a second copy is how this rule
+   used to read 'max-height: inherit' and cap nothing at all. 'inherit' took
+   the parent '.dvk-view', which sets only padding, so it computed to 'none'
+   and the wrap never scrolled — which also meant the sticky header below had
+   no bounded scrollport to stick to, and did nothing either. */
 .dvk-table-summary {
   margin: 0 0 8px;
   color: var(--dsw-alias-label-tertiary, #888);
   font: 11px/18px var(--dsw-font-family, system-ui, sans-serif);
 }
 .dvk-table-wrap {
-  max-height: inherit;
   overflow: auto;
 }
 .dvk-table {
@@ -2613,6 +2821,74 @@ const STYLES = `
   padding: 12px 2px;
   color: var(--dsw-alias-label-tertiary, #888);
   font: 11px/18px var(--dsw-font-family, system-ui, sans-serif);
+}
+
+/* Enlarged preview.
+
+   A <dialog> shown with showModal() is in the browser's top layer, which is
+   the whole reason this is not a hand-built 'position: fixed' overlay: a fixed
+   element is positioned against its nearest ancestor that creates a containing
+   block, and '.dvk-chart { contain: content }' above already does exactly
+   that. The top layer escapes ancestor stacking and containing blocks by
+   specification, and brings the backdrop, ESC and a focus trap with it.
+
+   Sizing is a viewport share, set by renderers/html.js, not a pixel constant
+   here — the same reasoning as maxTableHeight. */
+.dvk-modal {
+  padding: 0;
+  border: 0;
+  border-radius: var(--dsw-radius-md, 10px);
+  background: var(--dsw-alias-bg-base, #fff);
+  color: var(--dsw-alias-text-primary, #111);
+  /* 86% of the viewport: room for the title bar and a strip of the page behind,
+     so it reads as an overlay rather than a takeover. */
+  width: min(1180px, 94vw);
+  max-width: 94vw;
+  max-height: 86vh;
+  overflow: hidden;
+}
+.dvk-modal::backdrop {
+  background: rgb(0 0 0 / 45%);
+}
+.dvk-modal__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px 8px 14px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.2));
+  font: 12px/20px var(--dsw-font-family, system-ui, sans-serif);
+}
+.dvk-modal__title {
+  color: var(--dsw-alias-label-secondary, #555);
+  font-weight: 600;
+}
+.dvk-modal__close {
+  appearance: none;
+  border: 0;
+  border-radius: var(--dsw-radius-sm, 6px);
+  padding: 2px 8px;
+  font: 12px/20px var(--dsw-font-family, system-ui, sans-serif);
+  color: var(--dsw-alias-label-secondary, #555);
+  background: transparent;
+  cursor: pointer;
+}
+.dvk-modal__close:hover {
+  color: var(--dsw-alias-label-primary, #111);
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.12));
+}
+.dvk-modal__close:focus-visible {
+  outline: 1px solid var(--dsw-alias-state-business-primary, #4a7dff);
+  outline-offset: 1px;
+}
+.dvk-modal__frame {
+  display: block;
+  width: 100%;
+  border: 0;
+  /* The height is set inline from the measurement; this only keeps a frame
+     that has not been measured yet from collapsing to zero. */
+  min-height: 120px;
+  background: var(--dsw-alias-bg-base, #fff);
 }
 `;
 
