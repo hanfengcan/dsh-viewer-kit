@@ -93,9 +93,13 @@
  *     htmlAllowScripts: true
  * ```
  *
- * The client half exports no `Config` schema on purpose (see `client/index.js`),
- * so values arrive unvalidated and `resolveConfig` drops unknown keys and
- * type-checks the rest against the defaults.
+ * The keys, their defaults and their validation are owned by `src/schema.js`,
+ * which both halves share. The HOST half exports it as a `Config` schema, so a
+ * bad value fails the row loudly at load; the CLIENT half receives the validated
+ * result over `GET /dsh-viewer-kit/config` and re-resolves it leniently, so a
+ * missing route costs defaults rather than a failed web boot. This typedef is
+ * the shape both agree on, and it is what keeps a rename from being a silent
+ * behaviour change.
  *
  * @property {boolean} enabled Master switch.
  * @property {readonly string[]} [disabledRendererIds] Renderers the user turned

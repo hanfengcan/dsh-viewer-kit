@@ -10,114 +10,19 @@
  */
 
 import { CODE_VIEW, createRequest } from './contract.js'
+import { DEFAULT_CONFIG, resolveConfig } from '../schema.js'
 import { createViewState } from './view-state.js'
 
-/** @type {Required<import('./contract.js').ViewerKitConfig>} */
-export const DEFAULT_CONFIG = Object.freeze({
-  enabled: true,
-  /**
-   * Turn renderers off without uninstalling. One list, two tiers, and the
-   * difference is the whole reason it is easy to get wrong:
-   *
-   *   by RENDERER ID  — 'table', 'html', 'echarts'. That renderer stops
-   *                     matching. A block it used to claim is re-offered to the
-   *                     remaining renderers, and if none claims it the block
-   *                     falls back to the native code view.
-   *   by FENCE NAME   — 'csv', 'json', 'markdown', 'html'. No renderer sees
-   *                     such a block at all, whether or not a renderer exists
-   *                     for it.
-   *
-   * They overlap, so both `['csv']` and `['table']` switch off CSV tables, for
-   * different reasons: the first refuses the block, the second removes the
-   * claimant. They part company for a language no renderer is named after —
-   * `['json']` leaves every `json` block alone, which is the only way to keep
-   * an ECharts option out of the table renderer without naming `echarts`.
-   */
-  disabledRendererIds: Object.freeze([]),
-  maxSourceBytes: 256 * 1024,
-  /**
-   * How an embedded HTML preview decides its height.
-   *
-   *   'measure' — size the frame to the document's real height, capped. Short
-   *               content shows fully with no empty band; long content scrolls.
-   *               Falls back to 'fit' if the measurement never arrives.
-   *   'fit'     — estimate the rendered height. Same intent as 'measure',
-   *               without the measuring frame, so a short estimate scrolls.
-   *   'fixed'   — always exactly `maxPreviewHeight`. Fully predictable, and
-   *               short content leaves space below itself.
-   *
-   * 'fixed' does not remove the empty space, it only makes it constant; the
-   * first reported problem was an empty band mid-conversation, which is why the
-   * default measures rather than fixing a number.
-   */
-  previewHeightMode: 'measure',
-  /**
-   * Tallest an embedded preview may grow, in CSS pixels — and, under
-   * `previewHeightMode: 'fixed'`, the exact height.
-   *
-   * 320 rather than a taller figure because a preview is a glance, not a page
-   * view: at 520 a short document left a band of empty frame in the middle of
-   * the conversation, which reads as broken rather than generous. Anything
-   * taller scrolls inside the frame, which is the honest signal that there is
-   * more to see.
-   */
-  maxPreviewHeight: 320,
-  htmlAllowScripts: false,
-  /**
-   * Height of an embedded chart, in CSS pixels.
-   *
-   * Charts need an explicit height: a canvas inside an auto-height box renders
-   * at zero, and ECharts does not recover from that on its own. Kept separate
-   * from `maxPreviewHeight` because this is a chosen size, not a ceiling.
-   */
-  chartHeight: 360,
-  /**
-   * Open a claimed block in the rendered view rather than its source.
-   *
-   * Preview is the default because the whole point of the kit is to show what
-   * the content *is*: a chart, a table, a page. Reading the markup is the
-   * exception, so it costs a click. A renderer that has no preview view is
-   * unaffected — `pickInitialView` falls back to the code view when the
-   * default is not among the block's views, and a remembered per-block choice
-   * always wins over this.
-   */
-  defaultToPreview: true,
-})
-
 /**
- * Build a config from a partial user patch. Unknown keys are dropped so a
- * stale settings blob cannot smuggle behaviour in.
+ * The shipped defaults and the lenient resolver, owned by `src/schema.js`.
  *
- * @param {Partial<import('./contract.js').ViewerKitConfig> | null | undefined} patch
- * @returns {Required<import('./contract.js').ViewerKitConfig>}
+ * They live there rather than here because the host half validates the same
+ * field table strictly and publishes the same defaults over the config route.
+ * A second copy is how this file ended up with a duplicated
+ * `DEFAULT_CHART_HEIGHT` whose `||` fallback `resolveConfig` had already made
+ * unreachable. Re-exported so existing importers keep working.
  */
-export function resolveConfig(patch) {
-  /** @type {any} */
-  const out = { ...DEFAULT_CONFIG, disabledRendererIds: [] }
-  if (patch == null || typeof patch !== 'object') return out
-  for (const key of Object.keys(DEFAULT_CONFIG)) {
-    const value = patch[key]
-    if (value === undefined) continue
-    if (key === 'disabledRendererIds') {
-      out[key] = Array.isArray(value) ? value.filter((id) => typeof id === 'string') : []
-    } else if (key === 'previewHeightMode') {
-      // An enum cannot be checked by `typeof`, which would accept any string and
-      // leave the renderer comparing against a mode that does not exist.
-      if (value === 'measure' || value === 'fit' || value === 'fixed') out[key] = value
-    } else if (key === 'chartHeight') {
-      // A canvas in a zero-height box draws nothing, and `typeof` cannot tell 0
-      // from 360. A height the reader cannot see is worse than the default, so
-      // this one key gets a value check instead of a type check. It is the only
-      // place that rule lives — the renderer reads the resolved value and adds
-      // no fallback of its own, because a second copy of the default is a
-      // second thing to forget when the default changes.
-      if (typeof value === 'number' && Number.isFinite(value) && value > 0) out[key] = value
-    } else if (typeof value === typeof DEFAULT_CONFIG[key]) {
-      out[key] = value
-    }
-  }
-  return out
-}
+export { DEFAULT_CONFIG, resolveConfig }
 
 /**
  * @param {{

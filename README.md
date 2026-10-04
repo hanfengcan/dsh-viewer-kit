@@ -64,7 +64,10 @@
 ```
 
 用户 patch 在所有组合包层**之后**应用、按行 id 胜出，所以这样写会覆盖包内默认值。
-改完刷新即可，不必重启。
+
+> **改完要重启 profile，不只是刷新页面。** 配置由**宿主半体**在激活时读取并校验，
+> 浏览器是启动后去取它的结果。刷新页面只会让客户端重新拉一次**同样的**结果。
+> 启动日志里那一行 `host config published at /dsh-viewer-kit/config: {...}` 就是宿主读到的值。
 
 | 键 | 默认 | 作用 |
 |---|---|---|
@@ -72,10 +75,62 @@
 | `defaultToPreview` | `true` | 认领到的块默认打开**渲染结果**而不是源码 |
 | `previewHeightMode` | `measure` | HTML 预览高度怎么定 —— 见下 |
 | `maxPreviewHeight` | `320` | `measure`/`fit` 下是**上限**，`fixed` 下就是**框高** |
-| `chartHeight` | `360` | 图表高度。图表**必须**有确定高度，否则画布渲染成 0 高 |
+| `chartHeight` | `360` | 图表高度。必须 > 0，否则画布渲染成 0 高 |
 | `htmlAllowScripts` | `false` | 允许预览里的 HTML 执行**它自己的**脚本 |
 | `maxSourceBytes` | `262144` | 超过这个大小的源码保持原生代码块 |
-| `disabledRendererIds` | `[]` | 按 id 关掉个别渲染器，无需卸载 |
+| `disabledRendererIds` | `[]` | 关掉个别渲染器，**两层语义** —— 见下 |
+
+#### 配置怎么从磁盘走到浏览器
+
+这一段是本插件最反直觉的地方，值得单独说，因为**改错地方不会有任何提示**。
+
+```
+cordis.patch.yml  ──▶  宿主半体 apply(ctx, config)  ──▶  Config schema 校验
+                                                              │
+                                                     失败：响亮报错（安全，宿主无行为）
+                                                              │
+                                                     通过：GET /dsh-viewer-kit/config
+                                                              │
+                                            浏览器 apply() ────┘  首扫之前 fetch 一次
+```
+
+**为什么需要这一跳。** 渲染发生在浏览器里，而配置在 Node 进程的 patch 文件里。中间的
+boot 线缆**不带配置** —— `graphRow()` 只发 `{id, url, rev, inject?, immediately?, external?}`，
+`parseBootManifest()` 只读回这几个字段，所以客户端 `apply(ctx, rowConfig)` 拿到的
+`rowConfig` **恒为 `undefined`**。这不是本插件的缺陷，是 DSH 目前的形状。
+社区插件 `dshmarket` 走的是同一条路（宿主 `apply(ctx, config)` + `webServer.register`，
+客户端 `fetch`）。
+
+**两个半体的严格程度故意不同：**
+
+| | 宿主半体 | 客户端半体 |
+|---|---|---|
+| 遇到错值 | **响亮失败**（`Config` schema） | 静默回落默认值 |
+| 遇到不认识的键 | **报错** | 忽略 |
+| 为什么 | 配置写错本来就该立刻发现；且宿主半体无行为，失败只记日志，**不会炸 web boot** | 路由 404、宿主半体没装、两个版本不一致 —— 这些情况下**能渲染**比"报错什么都看不到"重要得多 |
+
+**改完仍不生效，按这个顺序查：**
+
+1. 浏览器控制台那行括号里是 `from host` 还是 `from defaults`
+2. 宿主进程日志有没有 `host config published at …`
+3. `pnpm run probe` —— 它盯着 DSH 的宿主源码，线缆形状变了会报红
+
+`tools/probe-host.mjs` 有一条**故意埋的绊子**：`the boot wire still carries no config,
+so P0 is still open`。DSH 哪天给线缆加了配置，这条会红 —— 那天就可以删掉整条 HTTP 桥，
+直接读行配置。
+
+#### `disabledRendererIds` 的两层语义
+
+同一个列表，两层，区别是整件事容易搞错的原因：
+
+| 写法 | 含义 | 块会怎样 |
+|---|---|---|
+| `['table']` | 按**渲染器 id** 关闭 | 该渲染器不再认领，块**重新交给剩下的渲染器**；没人认领就回落原生代码视图 |
+| `['csv']` | 按**围栏名**关闭 | 该块**根本不进渲染器**，不管有没有渲染器认领它 |
+
+两者会重叠：`['csv']` 和 `['table']` 都能关掉 CSV 表格，但原因不同。真正分家的是
+**没有同名渲染器的语言** —— `['json']` 会让所有 `json` 块原样保留，而这是"别让 ECharts
+option 被表格渲染器认领"却不点名 `echarts` 的唯一办法。
 
 ### 预览高度是怎么定的
 
@@ -104,9 +159,15 @@
 **仅仅渲染一段内容就可能发起该内容里的网络请求**（远程图片自动加载、脚本可向任意地址发请求）。
 内容本身是模型写的，泄露面基本限于模型已写出的东西 —— 但"看一眼就联网"确实是新引入的能力。
 
-> DSH 有配置界面（`dsh-settings` + `dsh-config-editor`），但按其 README：表单只暴露标了
-> `.volatile()` 的字段，且**目前没有任何客户端实现按 schema 自动生成表单**。
-> 所以现阶段开关是上面这段 patch 文本，不是界面里的一个勾。
+> **DSH 没有「按 schema 自动生成表单」这回事。** 核过 shipped 产物
+> `@deepseek-ai/dsh-client-ui-settings-plugins/lib/client.js`：它只是
+> `settings.plugins.tab` 这个 slot 的**容器**，自带的那一页是**只读清单**
+> （文案就是 "Inspect the plugins this deployment ships."），官方注释明说
+> 「配置页在各自的 companion package 里」。没有 Form generator。
+>
+> 所以本插件导出 `Config` schema 得到的是**校验 + 默认值 + agent 可读的 JSON Schema**
+> （`cordis_inspect_query` → `Config.listConfigs` 能查到），**不是**一个能点的界面。
+> 要界面得自己注册一个 tab 页面并提供读写路由，那是另一件事。
 
 ### 已知限制
 
@@ -152,15 +213,18 @@ dsh plugin --profile desktop add ./dsh-viewer-kit-0.9.0.tgz
 
 ### 确认它活着
 
-控制台应该出现三行：
+浏览器控制台出现四行（宿主进程另有一行 `host config published at …`）：
 
 ```
-[dsh-viewer-kit] config: default view=preview, html scripts=off, max preview height=320px, chart height=360px
 [dsh-viewer-kit] renderers: html, echarts, table
+[dsh-viewer-kit] waiting for the host config route
+[dsh-viewer-kit] config: default view=preview, html scripts=off, max preview height=320px, chart height=360px (from defaults, host answered 404)
 [dsh-viewer-kit] v0.9.0 active — N code block(s) enhanced
 ```
 
 > 渲染器按**优先级**排列而非注册顺序：`html` 10 > `echarts` 8 > `table` 5。
+> 括号里是配置的来源。`from host` 说明宿主半体在跑、`cordis.patch.yml` 里的值已生效；
+> `from defaults, …` 说明没读到宿主配置，**所有键都是默认值** —— 想知道原因，括号里写了。
 
 排障时用这一条命令：
 
@@ -193,7 +257,7 @@ __DSH_VIEWER_KIT__.diagnose()
 
 ```powershell
 pnpm install
-pnpm run check        # 类型检查 → 构建 → 97 项测试 → 产物激活复现 → 宿主契约探针
+pnpm run check        # 类型检查 → 构建 → 109 项测试 → 产物激活复现 → 宿主契约探针
 pnpm run release      # check + 打包自检，完整发布门禁
 ```
 
@@ -289,7 +353,7 @@ src/client/
   renderers/           L5 渲染器：echarts / html / table
 src/index.js           Host 半体（仅作为 Loader 行的锚点）
 client/                ★ 构建产物，提交进库（见下）
-tests/                 97 项测试 + 探针负向测试 + DOM 垫片 + 从 DSH 真实产物抄来的夹具
+tests/                 109 项测试 + 探针负向测试 + DOM 垫片 + 从 DSH 真实产物抄来的夹具
 tools/                 宿主契约探针（读 app.asar）+ 发布前自检
 docs/                  架构设计 / 渲染器作者指南
 tsdown.config.ts       ★ 客户端 bundle 的构建契约（模块格式与 chunk 规则在这里定义）
@@ -300,7 +364,7 @@ tsdown.config.ts       ★ 客户端 bundle 的构建契约（模块格式与 ch
 > **构建产物是提交进版本库的**，这与"不提交产物"的常规做法相反，是有意的：本仓库就是被
 > `pnpm add file:<path>` 安装的那一份，而 DSH 激活时会直接 `readFileSync` 这个 bundle，
 > 缺文件会抛 `MissingClientBundleError` 并让 entry 激活失败。提交它们，新克隆的树才开箱可装
-> —— **这一条实测过：`git clone` 后不装任何依赖，97 项测试全绿。**
+> —— **这一条实测过：`git clone` 后不装任何依赖，109 项测试全绿。**
 > 改完源码务必重新 `pnpm run build` 再提交。
 
 > **tarball 只装必需的东西。** `package.json` 的 `files` 只有 `lib/ client/

@@ -159,6 +159,12 @@ export function activateBundle(bundleSource, options = {}) {
     TextDecoder,
     atob,
     btoa,
+    // The client half now asks the host half for its configuration before it
+    // scans, so activation is asynchronous. The default is a 404: that is the
+    // real behaviour when the host half is not installed, and it exercises the
+    // "fall back to defaults" path that most tests want anyway. A test that
+    // cares about a specific config passes `hostConfig`.
+    fetch: options.fetch ?? (() => Promise.resolve({ ok: false, status: 404 })),
     console: {
       log: (...values) => harness.log.push(values.join(' ')),
       error: (...values) => harness.log.push(`ERROR ${values.join(' ')}`),
@@ -170,8 +176,9 @@ export function activateBundle(bundleSource, options = {}) {
   /** @type {{ ok: boolean, error?: Error }} */
   const applied = { ok: false }
   try {
-    // The second argument is the loader row's `config` block, which cordis
-    // forwards verbatim when the plugin exports no `Config` schema.
+    // The second argument is the loader row's `config` block. It is always
+    // `undefined` in a real browser — the boot wire carries no config — and
+    // `hostConfig` is how a test stands in for the host half's HTTP route.
     loaded?.apply(harness.ctx, options.rowConfig)
     applied.ok = true
   } catch (error) {
@@ -183,13 +190,37 @@ export function activateBundle(bundleSource, options = {}) {
     loaded,
     applied,
     sandbox,
-    switches: env.document.querySelectorAll('[data-dvk-switch]').length,
-    hook: vm.runInContext('typeof globalThis.__DSH_VIEWER_KIT__', sandbox),
+    // Getters, not values. Activation is now asynchronous — the seam is built
+    // after the config request settles — so a snapshot taken at return time is
+    // always the pre-scan state and every assertion on it fails. Read through
+    // these and they answer "what is true now", which is what a test means.
+    get switches() {
+      return env.document.querySelectorAll('[data-dvk-switch]').length
+    },
+    get hook() {
+      return vm.runInContext('typeof globalThis.__DSH_VIEWER_KIT__', sandbox)
+    },
     bootMarker: vm.runInContext('typeof globalThis.__DSH_VIEWER_KIT_BOOTED__', sandbox),
     /** The live hook object, for asserting on config-driven behaviour. */
     live: () => vm.runInContext('globalThis.__DSH_VIEWER_KIT__ ?? null', sandbox),
     /** Which view the fixture block is currently showing. */
     mode: () => env.document.querySelector('[data-code-block-content]')?.getAttribute('data-dvk-mode') ?? null,
+    /**
+     * Wait for activation to finish.
+     *
+     * `apply` returns as soon as it has registered its renderers; the seam is
+     * built only after the config request settles, so anything that asserts on
+     * a switch, a mounted preview, or the diagnostic hook has to await this
+     * first. Bounded so a bug that never starts the seam fails the assertion
+     * rather than hanging the suite.
+     */
+    async whenReady(ticks = 50) {
+      for (let attempt = 0; attempt < ticks; attempt++) {
+        if (vm.runInContext('globalThis.__DSH_VIEWER_KIT__ != null', sandbox) === true) return true
+        await new Promise((done) => setTimeout(done, 0))
+      }
+      return false
+    },
     /** Run every registered effect disposer, newest first — what unload does. */
     unload() {
       for (const effect of [...harness.effects].reverse()) effect.dispose()

@@ -180,9 +180,13 @@ const SWITCH_ATTRIBUTE = "data-dvk-switch";
 *     htmlAllowScripts: true
 * ```
 *
-* The client half exports no `Config` schema on purpose (see `client/index.js`),
-* so values arrive unvalidated and `resolveConfig` drops unknown keys and
-* type-checks the rest against the defaults.
+* The keys, their defaults and their validation are owned by `src/schema.js`,
+* which both halves share. The HOST half exports it as a `Config` schema, so a
+* bad value fails the row loudly at load; the CLIENT half receives the validated
+* result over `GET /dsh-viewer-kit/config` and re-resolves it leniently, so a
+* missing route costs defaults rather than a failed web boot. This typedef is
+* the shape both agree on, and it is what keeps a rename from being a silent
+* behaviour change.
 *
 * @property {boolean} enabled Master switch.
 * @property {readonly string[]} [disabledRendererIds] Renderers the user turned
@@ -854,6 +858,341 @@ function createDomSeam(options) {
 }
 
 //#endregion
+//#region src/schema.js
+/**
+* The one place this plugin's configuration is defined.
+*
+* ## Why this file exists
+*
+* The kit has two halves that run in different processes, and until recently
+* only one of them had any configuration at all:
+*
+*   - the **host half** (`lib/index.js`, Node) receives the patch row's
+*     `config:` block as `apply(ctx, config)`, and owns validation;
+*   - the **client half** (`client/client.js`, the browser) draws everything.
+*
+* A browser plugin cannot read `cordis.patch.yml`, and the boot wire carries no
+* config at all — `graphRow()` emits `{id, url, rev, inject?, immediately?,
+* external?}` and `parseBootManifest()` reads back exactly those fields. So the
+* host half publishes the resolved config over an HTTP route and the client
+* fetches it before its first scan. `tools/probe-host.mjs` fails the build if
+* DSH ever adds config to the wire, because that is the day to delete this file
+* and read the row directly.
+*
+* ## Why one field table
+*
+* Three things must never disagree: the default, the strict check the host
+* runs, and the lenient fallback the client runs. Describing each field once
+* and deriving all three removes the class of bug where `chartHeight` is
+* validated in one place and defaulted in another — which is exactly how a
+* dead `DEFAULT_CHART_HEIGHT` and an unreachable `|| 360` ended up in the
+* echarts renderer.
+*
+* Zero dependencies, deliberately: this module is imported by the host half,
+* which `scripts/build-host.mjs` copies verbatim with no bundler in the loop.
+* A schema library would have to resolve at runtime from the profile.
+*
+* @module schema
+*/
+/**
+* One configuration field.
+*
+* `kind` selects the check; `doc` is the user-facing explanation reused by the
+* bundle patch, so the two cannot drift.
+*
+* @typedef {object} Field
+* @property {string} key
+* @property {'boolean' | 'natural' | 'positive' | 'enum' | 'stringList'} kind
+* @property {string | number | boolean | string[]} fallback
+* @property {readonly string[]} [values] enum members, when `kind` is 'enum'
+* @property {string} doc
+*/
+/** @type {readonly Field[]} */
+const FIELDS = [
+	{
+		key: "enabled",
+		kind: "boolean",
+		fallback: true,
+		doc: "Master switch. false leaves every code block to the host."
+	},
+	{
+		key: "disabledRendererIds",
+		kind: "stringList",
+		fallback: [],
+		doc: [
+			"Turn renderers off without uninstalling. One list, two tiers:",
+			"  by RENDERER ID ('table', 'html', 'echarts') — that renderer stops",
+			"    matching, and the block is re-offered to the rest;",
+			"  by FENCE NAME ('csv', 'json', 'markdown') — no renderer sees such a",
+			"    block at all, whether or not a renderer exists for it.",
+			"They overlap for a language a renderer is named after: ['csv'] and",
+			"['table'] both switch off CSV tables, for different reasons."
+		].join("\n")
+	},
+	{
+		key: "maxSourceBytes",
+		kind: "natural",
+		fallback: 262144,
+		doc: "Sources above this many bytes keep the native code block."
+	},
+	{
+		key: "previewHeightMode",
+		kind: "enum",
+		values: [
+			"measure",
+			"fit",
+			"fixed"
+		],
+		fallback: "measure",
+		doc: [
+			"How an embedded HTML preview decides its height:",
+			"  'measure' — size the frame to the document's real height, capped.",
+			"              Short content shows fully with no empty band; long",
+			"              content scrolls. Falls back to fit if the measurement",
+			"              never arrives.",
+			"  'fit'     — estimate the rendered height. Same intent, without the",
+			"              measuring frame, so a short estimate can scroll.",
+			"  'fixed'   — always exactly maxPreviewHeight. Fully predictable, and",
+			"              short content leaves empty space below itself."
+		].join("\n")
+	},
+	{
+		key: "maxPreviewHeight",
+		kind: "positive",
+		fallback: 320,
+		doc: [
+			"Tallest an embedded preview may grow, in CSS pixels — and, under",
+			"previewHeightMode 'fixed', the exact height.",
+			"320 rather than a taller figure because a preview is a glance, not a",
+			"page view: at 520 a short document left a band of empty frame in the",
+			"middle of the conversation, which reads as broken rather than",
+			"generous. Anything taller scrolls inside the frame, which is the",
+			"honest signal that there is more to see."
+		].join("\n")
+	},
+	{
+		key: "chartHeight",
+		kind: "positive",
+		fallback: 360,
+		doc: [
+			"Height of an embedded chart, in CSS pixels.",
+			"Charts need an explicit height: a canvas inside an auto-height box",
+			"renders at zero. Must be positive — a zero-height chart is invisible,",
+			"which is worse than falling back to the default."
+		].join("\n")
+	},
+	{
+		key: "htmlAllowScripts",
+		kind: "boolean",
+		fallback: false,
+		doc: [
+			"Let previewed HTML run scripts, for charts and interactive reports.",
+			"The frame is ALWAYS an opaque origin: allow-scripts is granted on its",
+			"own and never paired with allow-same-origin, so the document cannot",
+			"reach the host DOM, cookies, or storage. What changes is that merely",
+			"rendering a block can start that block's network requests."
+		].join("\n")
+	},
+	{
+		key: "defaultToPreview",
+		kind: "boolean",
+		fallback: true,
+		doc: [
+			"Open a claimed block in its rendered view instead of its source.",
+			"Preview is the default because the whole point of the kit is to show",
+			"what the content *is*: a chart, a table, a page. Reading the markup is",
+			"the exception, so it costs a click."
+		].join("\n")
+	}
+];
+/**
+* Is `value` acceptable for one field?
+*
+* @param {Field} field
+* @param {unknown} value
+* @returns {boolean}
+*/
+function accepts(field, value) {
+	switch (field.kind) {
+		case "boolean": return typeof value === "boolean";
+		case "natural": return typeof value === "number" && Number.isInteger(value) && value > 0;
+		case "positive": return typeof value === "number" && Number.isFinite(value) && value > 0;
+		case "enum": return typeof value === "string" && (field.values ?? []).includes(value);
+		case "stringList": return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+		default: return false;
+	}
+}
+/**
+* @returns {Required<import('./client/contract.js').ViewerKitConfig>}
+*/
+function buildDefaults() {
+	/** @type {Record<string, string | number | boolean | readonly string[]>} */
+	const out = {};
+	for (const field of FIELDS) out[field.key] = field.fallback;
+	return out;
+}
+/**
+* The shipped defaults, derived from {@link FIELDS}.
+*
+* @type {Readonly<Required<import('./client/contract.js').ViewerKitConfig>>}
+*/
+const DEFAULT_CONFIG = Object.freeze(buildDefaults());
+/** @type {Readonly<Record<string, Field>>} */
+const BY_KEY = Object.freeze(Object.fromEntries(FIELDS.map((field) => [field.key, field])));
+/**
+* Build a config from a partial patch, dropping anything unacceptable.
+*
+* This is the client's path, and it is deliberately lenient. The host has
+* already validated the same values strictly before publishing them, so by the
+* time anything reaches here a rejection means the route is serving something
+* this build does not understand — an older host, a hand-edited response, a
+* half-written file. Defaults are a better answer than a failed web boot.
+*
+* @param {Record<string, unknown> | null | undefined} patch
+* @returns {Required<import('./client/contract.js').ViewerKitConfig>} every key
+*   present, every value one the table accepts
+*/
+function resolveConfig(patch) {
+	/** @type {any} */
+	const out = { ...DEFAULT_CONFIG };
+	if (patch == null || typeof patch !== "object") return out;
+	for (const field of FIELDS) {
+		const value = patch[field.key];
+		if (value === void 0) continue;
+		if (accepts(field, value)) out[field.key] = value;
+	}
+	return out;
+}
+
+//#endregion
+//#region src/client/host-config.js
+/**
+* Fetch the host's resolved configuration before the first scan.
+*
+* ## Why this is asynchronous, and why that is not a problem
+*
+* The config lives in the host process and the rendering lives in the browser,
+* so getting it across means one HTTP round trip. The obvious worry is that
+* blocks would render at the wrong size and then jump once the answer arrived.
+* They do not, because nothing is scanned until this resolves: the seam is not
+* even constructed until then, so there is no already-negotiated surface to
+* re-negotiate.
+*
+* ## Why the URL is document-relative
+*
+* `new URL(path, document.baseURI).pathname`, not `path` directly. dshmarket
+* shipped root-absolute fetches first and had to fix them: a request for
+* `/dsh-market/status` issued from a page served under a path prefix goes to
+* the domain root instead of the mount point, and every call 404s. DSH's own
+* client module system does the same thing for the same reason —
+* `comboReference()` in `dsh-client-modules/lib/index.js` strips the leading
+* slash at the boundary between the two halves.
+*
+* @module client/host-config
+*/
+/** The path the host half registers. Mirrors `CONFIG_ROUTE` in `src/index.js`. */
+const CONFIG_PATH = "/dsh-viewer-kit/config";
+/**
+* How long to wait before giving up and rendering with defaults.
+*
+* Deliberately short. A missing host half answers 404 in milliseconds, so the
+* timeout only ever governs a request that is *hanging* — a wedged web server
+* or a proxy that accepts the connection and never replies. Blocking the first
+* render for a long time to save a fetch would be the worse trade: the user
+* would be looking at unenhanced code blocks, which is exactly what this
+* plugin exists to prevent.
+*/
+const CONFIG_TIMEOUT_MS = 1200;
+/**
+* Resolve the config route against the page, not the domain root.
+*
+* @param {string} [path]
+* @returns {string}
+*/
+function configUrl(path = CONFIG_PATH) {
+	const relative = path.replace(/^\/+/, "");
+	if (typeof document === "undefined" || document.baseURI === void 0) return `/${relative}`;
+	return new URL(relative, document.baseURI).pathname;
+}
+/**
+* Read the host's config, always resolving.
+*
+* Never rejects. A failure here means "render with the shipped defaults", which
+* is the behaviour of every build before the host half existed, so the caller
+* does not need a rejection path at all.
+*
+* @param {{ fetch?: typeof globalThis.fetch, timeoutMs?: number, url?: string, now?: () => number, setTimeout?: typeof setTimeout, clearTimeout?: typeof clearTimeout }} [options]
+*   Injection points, so the tests drive this without a network or a clock.
+* @returns {Promise<{ config: Record<string, any>, source: 'host' | 'defaults', reason?: string }>}
+*/
+async function loadHostConfig(options = {}) {
+	const doFetch = options.fetch ?? globalThis.fetch;
+	const url = options.url ?? configUrl();
+	if (typeof doFetch !== "function") return {
+		config: resolveConfig(void 0),
+		source: "defaults",
+		reason: "no fetch in this runtime"
+	};
+	const controller = typeof AbortController === "function" ? new AbortController() : null;
+	const schedule = options.setTimeout ?? setTimeout;
+	const cancel = options.clearTimeout ?? clearTimeout;
+	/** @type {any} */
+	let timer = null;
+	const timeout = new Promise((done) => {
+		timer = schedule(() => {
+			controller?.abort();
+			done({ timedOut: true });
+		}, options.timeoutMs ?? 1200);
+	});
+	try {
+		const answer = await Promise.race([doFetch(url, controller === null ? {} : {
+			signal: controller.signal,
+			cache: "no-store"
+		}).then((response) => ({
+			timedOut: false,
+			response
+		}), (error) => ({
+			timedOut: false,
+			error
+		})), timeout]);
+		if (answer.timedOut === true) return {
+			config: resolveConfig(void 0),
+			source: "defaults",
+			reason: `no answer within ${options.timeoutMs ?? 1200}ms`
+		};
+		const settled = answer;
+		if (settled.error !== void 0) return {
+			config: resolveConfig(void 0),
+			source: "defaults",
+			reason: `request failed: ${String(settled.error)}`
+		};
+		if (settled.response?.ok !== true) return {
+			config: resolveConfig(void 0),
+			source: "defaults",
+			reason: `host answered ${settled.response?.status ?? "nothing"}`
+		};
+		const body = await settled.response.json();
+		if (body === null || typeof body !== "object" || Array.isArray(body)) return {
+			config: resolveConfig(void 0),
+			source: "defaults",
+			reason: "host sent something that is not a config object"
+		};
+		return {
+			config: resolveConfig(body),
+			source: "host"
+		};
+	} catch (error) {
+		return {
+			config: resolveConfig(void 0),
+			source: "defaults",
+			reason: `unexpected: ${String(error)}`
+		};
+	} finally {
+		if (timer !== null) cancel(timer);
+	}
+}
+
+//#endregion
 //#region src/client/chunk-loader.js
 /**
 * Reaching a package-local client chunk.
@@ -1498,103 +1837,6 @@ function createViewState(options = {}) {
 *
 * @module kit
 */
-/** @type {Required<import('./contract.js').ViewerKitConfig>} */
-const DEFAULT_CONFIG = Object.freeze({
-	enabled: true,
-	/**
-	* Turn renderers off without uninstalling. One list, two tiers, and the
-	* difference is the whole reason it is easy to get wrong:
-	*
-	*   by RENDERER ID  — 'table', 'html', 'echarts'. That renderer stops
-	*                     matching. A block it used to claim is re-offered to the
-	*                     remaining renderers, and if none claims it the block
-	*                     falls back to the native code view.
-	*   by FENCE NAME   — 'csv', 'json', 'markdown', 'html'. No renderer sees
-	*                     such a block at all, whether or not a renderer exists
-	*                     for it.
-	*
-	* They overlap, so both `['csv']` and `['table']` switch off CSV tables, for
-	* different reasons: the first refuses the block, the second removes the
-	* claimant. They part company for a language no renderer is named after —
-	* `['json']` leaves every `json` block alone, which is the only way to keep
-	* an ECharts option out of the table renderer without naming `echarts`.
-	*/
-	disabledRendererIds: Object.freeze([]),
-	maxSourceBytes: 262144,
-	/**
-	* How an embedded HTML preview decides its height.
-	*
-	*   'measure' — size the frame to the document's real height, capped. Short
-	*               content shows fully with no empty band; long content scrolls.
-	*               Falls back to 'fit' if the measurement never arrives.
-	*   'fit'     — estimate the rendered height. Same intent as 'measure',
-	*               without the measuring frame, so a short estimate scrolls.
-	*   'fixed'   — always exactly `maxPreviewHeight`. Fully predictable, and
-	*               short content leaves space below itself.
-	*
-	* 'fixed' does not remove the empty space, it only makes it constant; the
-	* first reported problem was an empty band mid-conversation, which is why the
-	* default measures rather than fixing a number.
-	*/
-	previewHeightMode: "measure",
-	/**
-	* Tallest an embedded preview may grow, in CSS pixels — and, under
-	* `previewHeightMode: 'fixed'`, the exact height.
-	*
-	* 320 rather than a taller figure because a preview is a glance, not a page
-	* view: at 520 a short document left a band of empty frame in the middle of
-	* the conversation, which reads as broken rather than generous. Anything
-	* taller scrolls inside the frame, which is the honest signal that there is
-	* more to see.
-	*/
-	maxPreviewHeight: 320,
-	htmlAllowScripts: false,
-	/**
-	* Height of an embedded chart, in CSS pixels.
-	*
-	* Charts need an explicit height: a canvas inside an auto-height box renders
-	* at zero, and ECharts does not recover from that on its own. Kept separate
-	* from `maxPreviewHeight` because this is a chosen size, not a ceiling.
-	*/
-	chartHeight: 360,
-	/**
-	* Open a claimed block in the rendered view rather than its source.
-	*
-	* Preview is the default because the whole point of the kit is to show what
-	* the content *is*: a chart, a table, a page. Reading the markup is the
-	* exception, so it costs a click. A renderer that has no preview view is
-	* unaffected — `pickInitialView` falls back to the code view when the
-	* default is not among the block's views, and a remembered per-block choice
-	* always wins over this.
-	*/
-	defaultToPreview: true
-});
-/**
-* Build a config from a partial user patch. Unknown keys are dropped so a
-* stale settings blob cannot smuggle behaviour in.
-*
-* @param {Partial<import('./contract.js').ViewerKitConfig> | null | undefined} patch
-* @returns {Required<import('./contract.js').ViewerKitConfig>}
-*/
-function resolveConfig(patch) {
-	/** @type {any} */
-	const out = {
-		...DEFAULT_CONFIG,
-		disabledRendererIds: []
-	};
-	if (patch == null || typeof patch !== "object") return out;
-	for (const key of Object.keys(DEFAULT_CONFIG)) {
-		const value = patch[key];
-		if (value === void 0) continue;
-		if (key === "disabledRendererIds") out[key] = Array.isArray(value) ? value.filter((id) => typeof id === "string") : [];
-		else if (key === "previewHeightMode") {
-			if (value === "measure" || value === "fit" || value === "fixed") out[key] = value;
-		} else if (key === "chartHeight") {
-			if (typeof value === "number" && Number.isFinite(value) && value > 0) out[key] = value;
-		} else if (typeof value === typeof DEFAULT_CONFIG[key]) out[key] = value;
-	}
-	return out;
-}
 /**
 * @param {{
 *   config?: Partial<import('./contract.js').ViewerKitConfig> | null,
@@ -2411,6 +2653,11 @@ const VERSION = "0.9.0";
 */
 const LIVE_HANDLE = "__DSH_VIEWER_KIT_DISPOSE__";
 /**
+* Handle to the self-check hook, kept in a named constant so disposal can
+* check it is deleting its own object and not a newer activation's.
+*/
+const DIAGNOSTIC_HANDLE = "__DSH_VIEWER_KIT__";
+/**
 * Every renderer the kit ships with, in one place.
 *
 * Adding a renderer is exactly this: a new factory in `renderers/`, and one
@@ -2452,17 +2699,13 @@ globalThis.__DSH_VIEWER_KIT_BOOTED__ = VERSION;
 *   get: (name: string) => unknown,
 *   effect: (callback: () => unknown, label?: string) => unknown,
 * }} ctx
-* @param {Partial<import('./contract.js').ViewerKitConfig>} [rowConfig]
-*   The loader row's `config` block, verbatim.
-*
-*   Cordis only validates against a `Config` schema when the plugin exports
-*   one (`resolveConfig` in `@deepseek-ai/cordis`: `if (!runtime.Config) return
-*   config`), and this half deliberately exports none — importing schemastery
-*   into a client bundle would have to resolve through the module seed table.
-*   So the row config arrives unvalidated and goes through `resolveConfig`,
-*   which drops unknown keys and type-checks every value against the defaults.
-*   A malformed config therefore degrades to defaults instead of failing the
-*   entry, which matters: a failed entry is a failed web boot.
+* @param {Record<string, unknown>} [rowConfig]
+*   Unused, and deliberately so. The boot wire carries no config: `graphRow()`
+*   in `dsh-client-modules` emits `{id, url, rev, inject?, immediately?,
+*   external?}` and `parseBootManifest()` reads back exactly those fields, so
+*   this parameter is always `undefined`. Configuration arrives from the host
+*   half over `GET /dsh-viewer-kit/config` instead — see `host-config.js`. The
+*   parameter is kept because it is the documented hook signature.
 *
 * @returns {() => void} disposer
 */
@@ -2487,40 +2730,74 @@ function apply(ctx, rowConfig) {
 	const kit = createKit({ onError: (error, context) => {
 		log.error(`[${NAMESPACE}] ${context.rendererId} failed on ${context.requestId}`, error);
 	} });
-	kit.setConfig(rowConfig);
-	const settings = kit.config();
-	log.log(`[${NAMESPACE}] config: default view=${settings.defaultToPreview ? "preview" : "code"}, html scripts=${settings.htmlAllowScripts ? "on" : "off"}, max preview height=${settings.maxPreviewHeight}px, chart height=${settings.chartHeight}px` + (settings.disabledRendererIds.length > 0 ? `, disabled renderers=${settings.disabledRendererIds.join(",")}` : ""));
 	teardown.push(...RENDERER_FACTORIES.map((factory) => kit.register(factory(t))));
 	log.log(`[${NAMESPACE}] renderers: ${kit.renderers().map((renderer) => renderer.id).join(", ")}`);
 	teardown.push(installStyles(doc));
 	teardown.push(translator.dispose);
-	const seam = createDomSeam({
-		kit,
-		t,
-		document: doc,
-		root: doc.body,
-		MutationObserver: globalThis.MutationObserver
-	});
-	seam.scan();
-	teardown.push(() => seam.dispose());
-	globalThis.__DSH_VIEWER_KIT__ = {
-		version: VERSION,
-		kit,
-		seam,
-		stats: () => ({
-			...kit.stats(),
-			live: seam.size()
-		}),
-		diagnose: () => ({
-			version: VERSION,
-			renderers: kit.renderers().map((r) => r.id),
-			...seam.diagnose()
-		})
+	const report = (settings, source) => {
+		log.log(`[${NAMESPACE}] config: default view=${settings.defaultToPreview ? "preview" : "code"}, html scripts=${settings.htmlAllowScripts ? "on" : "off"}, max preview height=${settings.maxPreviewHeight}px, chart height=${settings.chartHeight}px` + (settings.disabledRendererIds.length > 0 ? `, disabled renderers=${settings.disabledRendererIds.join(",")}` : "") + ` (from ${source})`);
 	};
-	teardown.push(() => {
-		delete globalThis.__DSH_VIEWER_KIT__;
+	/**
+	* Build the seam and scan, once the settings are known.
+	*
+	* Nothing is observed before this runs — `createDomSeam` attaches its
+	* MutationObserver at construction, so constructing it early would let a
+	* block be negotiated with default settings and then disagree with the
+	* settings that arrive a moment later. Deferring the whole seam is what
+	* makes the first render the final one.
+	*
+	* @param {{ config: Record<string, any>, source: string, reason?: string }} loaded
+	*/
+	const start = (loaded) => {
+		if (disposed) return;
+		kit.setConfig(loaded.config);
+		const settings = kit.config();
+		report(settings, loaded.source === "host" ? "host" : `defaults, ${loaded.reason ?? "no host config"}`);
+		const seam = createDomSeam({
+			kit,
+			t,
+			document: doc,
+			root: doc.body,
+			MutationObserver: globalThis.MutationObserver
+		});
+		seam.scan();
+		teardown.push(() => seam.dispose());
+		globalThis[DIAGNOSTIC_HANDLE] = {
+			version: VERSION,
+			kit,
+			seam,
+			configSource: loaded.source,
+			stats: () => ({
+				...kit.stats(),
+				live: seam.size()
+			}),
+			diagnose: () => ({
+				version: VERSION,
+				renderers: kit.renderers().map((r) => r.id),
+				configSource: loaded.source,
+				...seam.diagnose()
+			})
+		};
+		teardown.push(() => {
+			if (globalThis[DIAGNOSTIC_HANDLE]?.version === VERSION) delete globalThis[DIAGNOSTIC_HANDLE];
+		});
+		log.log(`[${NAMESPACE}] v${VERSION} active — ${seam.size()} code block(s) enhanced`);
+	};
+	if (rowConfig != null && typeof rowConfig === "object") start({
+		config: resolveConfig(rowConfig),
+		source: "row"
 	});
-	log.log(`[${NAMESPACE}] v${VERSION} active — ${seam.size()} code block(s) enhanced`);
+	else {
+		log.log(`[${NAMESPACE}] waiting for the host config route`);
+		loadHostConfig().then(start, (error) => {
+			log.error(`[${NAMESPACE}] config loading failed`, error);
+			start({
+				config: resolveConfig(void 0),
+				source: "defaults",
+				reason: "loader threw"
+			});
+		});
+	}
 	const dispose = () => {
 		if (disposed) return;
 		disposed = true;

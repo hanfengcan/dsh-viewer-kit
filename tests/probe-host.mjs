@@ -186,6 +186,28 @@ function hostClient(overrides = {}) {
   ].join('\n')
 }
 
+/**
+ * A faithful reduction of `dsh-host-webserver/lib/index.js`.
+ *
+ * @param {{ withRegister?: boolean, throwsOnDuplicate?: boolean, withTables?: boolean }} [overrides]
+ * @returns {string}
+ */
+function hostWebServer(overrides = {}) {
+  return [
+    'var WebServer = class extends Service {',
+    ...(overrides.withTables === false ? [] : ['\texact = /* @__PURE__ */ new Map();', '\tprefixes = /* @__PURE__ */ new Map();']),
+    '\tregister(route) {',
+    '\t\tconst table = route.kind === "exact" ? this.exact : this.prefixes;',
+    overrides.throwsOnDuplicate === false
+      ? '\t\ttable.set(route.path, route);'
+      : '\t\tif (table.has(route.path)) throw new Error(`webserver: duplicate ${route.kind} route "${route.path}"`);',
+    '\t\ttable.set(route.path, route);',
+    '\t\treturn () => { table.delete(route.path); };',
+    '\t}',
+    '};',
+  ].join('\n')
+}
+
 // ---------------------------------------------------------------------------
 // Run the probe against a synthetic host
 // ---------------------------------------------------------------------------
@@ -196,7 +218,7 @@ let caseIndex = 0
 /**
  * Build an archive and run the real CLI against it.
  *
- * @param {{ index?: string, client?: string }} [host]
+ * @param {{ index?: string, client?: string, webServer?: string }} [host]
  * @returns {{ status: number, output: string, failed: string[] }}
  */
 function runProbe(host = {}) {
@@ -205,6 +227,7 @@ function runProbe(host = {}) {
   const archive = writeAsar(dir, {
     'dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js': host.index ?? hostIndex(),
     'dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/client.js': host.client ?? hostClient(),
+    'dsh/node_modules/@deepseek-ai/dsh-host-webserver/lib/index.js': host.webServer ?? hostWebServer(),
   })
   const result = spawnSync(process.execPath, [PROBE], {
     encoding: 'utf8',
@@ -223,7 +246,7 @@ process.stdout.write('probe-host (negative tests: the probe must be able to fail
 test('a faithful host passes every check', () => {
   const result = runProbe()
   eq(result.status, 0, `expected exit 0, got ${result.status}\n${result.output}`)
-  eq(result.output.includes('6/6 host assumptions confirmed'), true, `expected 6/6\n${result.output}`)
+  eq(result.output.includes('8/8 host assumptions confirmed'), true, `expected 8/8\n${result.output}`)
 })
 
 test('a host that stops accepting our chunk filename is caught', () => {
@@ -264,6 +287,24 @@ test('a host that starts shipping config on the wire is caught', () => {
   const result = runProbe({ index: hostIndex({ graphRowExtra: '\t\t...fields.config,' }) })
   eq(result.status, 1, 'must exit non-zero')
   eq(result.failed.includes('the boot wire still carries no config, so P0 is still open'), true, `expected that check to fail\n${result.output}`)
+})
+
+test('a host that stops throwing on a duplicate route is caught', () => {
+  // The host half relies on the effect disposer being the only thing that keeps
+  // re-activation from registering the route twice. If the throw goes away, a
+  // disposer that fails to run silently leaves the old route in place.
+  const result = runProbe({ webServer: hostWebServer({ throwsOnDuplicate: false }) })
+  eq(result.status, 1, 'must exit non-zero')
+  eq(result.failed.includes('our host half can still register the config route'), true, `expected that check to fail\n${result.output}`)
+})
+
+test('a host that merges the exact and prefix tables is caught', () => {
+  // The fence decision depends on exact routes being a separate table. Merged,
+  // the config route would fall inside the /api origin fence and become
+  // unreadable from a page reached by name.
+  const result = runProbe({ webServer: hostWebServer({ withTables: false }) })
+  eq(result.status, 1, 'must exit non-zero')
+  eq(result.failed.includes('an exact route still outranks the /api origin fence'), true, `expected that check to fail\n${result.output}`)
 })
 
 test('a named archive that is not there is an error, never a silent fallback', () => {

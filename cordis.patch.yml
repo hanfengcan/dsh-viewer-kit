@@ -16,35 +16,93 @@
 #     config:
 #       htmlAllowScripts: true
 #
-# The hook is `apply(ctx, config)`: this plugin exports no `Config` schema, so
-# cordis forwards this block verbatim (see `resolveConfig` in @deepseek-ai/cordis)
-# and the client half validates it defensively — unknown keys are dropped and a
-# wrong-typed value falls back to its default rather than failing the entry,
-# because a failed entry is a failed web boot.
+# The hook is `apply(ctx, config)`, and this plugin DOES export a `Config`
+# schema, so cordis validates this block at load: a wrong type or an unknown
+# key fails the HOST half loudly instead of being ignored. That is safe — the
+# host half contributes no behaviour, and the web-boot activation audit only
+# fails entries whose *client* half did not activate.
 #
-#   config:
-#     # Let previewed HTML run scripts, for charts and interactive reports.
-#     #
-#     # The frame is ALWAYS an opaque origin: `allow-scripts` is granted on its
-#     # own and never paired with `allow-same-origin`, so the document still
-#     # cannot reach the host DOM, cookies, or storage. What changes is that
-#     # merely rendering a block can start that block's network requests.
-#     htmlAllowScripts: false
+# The client half is a browser module, and a browser cannot read this file: the
+# boot wire carries no config at all. So the host half publishes the validated
+# result at `GET /dsh-viewer-kit/config` and the client fetches it before its
+# first scan. Uncomment a key here, restart the profile, and the value reaches
+# the renderer. `tools/probe-host.mjs` watches for DSH adding config to the
+# wire, which is the day this indirection can be deleted.
 #
-#     # Open a claimed block in its rendered view instead of its source.
-#     defaultToPreview: true
+# The block below is GENERATED from `src/schema.js` (`patchDocumentation()`),
+# and `tests/run.mjs` asserts the two stay identical — so an option cannot be
+# documented here without existing, or exist without being explained.
 #
-#     # Tallest an embedded preview may grow, in CSS pixels.
-#     maxPreviewHeight: 520
-#
-#     # Sources above this many bytes keep the native code block.
-#     maxSourceBytes: 262144
-#
-#     # Turn individual renderers off without uninstalling, by id.
-#     disabledRendererIds: []
-#
-#     # Master switch.
-#     enabled: true
 - insert:
     - id: dsh-viewer-kit
       name: 'dsh-viewer-kit'
+      # config:
+        # Master switch. false leaves every code block to the host.
+        #
+        # default: true
+        enabled: true
+
+        # Turn renderers off without uninstalling. One list, two tiers:
+        #   by RENDERER ID ('table', 'html', 'echarts') — that renderer stops
+        #     matching, and the block is re-offered to the rest;
+        #   by FENCE NAME ('csv', 'json', 'markdown') — no renderer sees such a
+        #     block at all, whether or not a renderer exists for it.
+        # They overlap for a language a renderer is named after: ['csv'] and
+        # ['table'] both switch off CSV tables, for different reasons.
+        #
+        # default: []
+        disabledRendererIds: []
+
+        # Sources above this many bytes keep the native code block.
+        #
+        # default: 262144
+        maxSourceBytes: 262144
+
+        # How an embedded HTML preview decides its height:
+        #   'measure' — size the frame to the document's real height, capped.
+        #               Short content shows fully with no empty band; long
+        #               content scrolls. Falls back to fit if the measurement
+        #               never arrives.
+        #   'fit'     — estimate the rendered height. Same intent, without the
+        #               measuring frame, so a short estimate can scroll.
+        #   'fixed'   — always exactly maxPreviewHeight. Fully predictable, and
+        #               short content leaves empty space below itself.
+        #
+        # default: "measure"
+        previewHeightMode: "measure"
+
+        # Tallest an embedded preview may grow, in CSS pixels — and, under
+        # previewHeightMode 'fixed', the exact height.
+        # 320 rather than a taller figure because a preview is a glance, not a
+        # page view: at 520 a short document left a band of empty frame in the
+        # middle of the conversation, which reads as broken rather than
+        # generous. Anything taller scrolls inside the frame, which is the
+        # honest signal that there is more to see.
+        #
+        # default: 320
+        maxPreviewHeight: 320
+
+        # Height of an embedded chart, in CSS pixels.
+        # Charts need an explicit height: a canvas inside an auto-height box
+        # renders at zero. Must be positive — a zero-height chart is invisible,
+        # which is worse than falling back to the default.
+        #
+        # default: 360
+        chartHeight: 360
+
+        # Let previewed HTML run scripts, for charts and interactive reports.
+        # The frame is ALWAYS an opaque origin: allow-scripts is granted on its
+        # own and never paired with allow-same-origin, so the document cannot
+        # reach the host DOM, cookies, or storage. What changes is that merely
+        # rendering a block can start that block's network requests.
+        #
+        # default: false
+        htmlAllowScripts: false
+
+        # Open a claimed block in its rendered view instead of its source.
+        # Preview is the default because the whole point of the kit is to show
+        # what the content *is*: a chart, a table, a page. Reading the markup is
+        # the exception, so it costs a click.
+        #
+        # default: true
+        defaultToPreview: true

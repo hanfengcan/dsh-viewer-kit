@@ -49,6 +49,14 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 /** Where the client module system's two halves live inside the archive. */
 const CLIENT_MODULES = 'dsh/node_modules/@deepseek-ai/dsh-client-modules/lib'
 
+/**
+ * The host half bridges the patch row's config to the browser over one HTTP
+ * route, so these three host contracts are as load-bearing as the chunk rule:
+ * the web server's `register` shape, the exact-route table's duplicate check,
+ * and the origin fence that an `exact` registration sits outside of.
+ */
+const HOST_WEB_SERVER = 'dsh/node_modules/@deepseek-ai/dsh-host-webserver/lib/index.js'
+
 // ---------------------------------------------------------------------------
 // Locating the archive
 // ---------------------------------------------------------------------------
@@ -201,6 +209,8 @@ const checks = []
  *   modulesText: string,
  *   clientPath: string,
  *   clientText: string,
+ *   webServerPath: string,
+ *   webServerText: string,
  * }) => { ok: boolean, detail: string }} run
  */
 function check(name, run) {
@@ -302,6 +312,43 @@ check('the boot wire still carries no config, so P0 is still open', (host) => {
   }
 })
 
+check('our host half can still register the config route', (host) => {
+  // The host half does `ctx.webServer.register({kind:'exact', path, handler})`
+  // and returns the disposer. If `register` changes shape the route silently
+  // stops existing, the client's fetch 404s, and every block renders at the
+  // defaults — which looks exactly like "my config is being ignored".
+  const register = locate(host.webServerText, /register\(route\) \{/)
+  if (register === null) return { ok: false, detail: 'webServer.register is gone or renamed' }
+  if (!/route\.kind === "exact"/.test(host.webServerText)) {
+    return { ok: false, detail: `register (${host.webServerPath}:${register.line}) no longer keys on kind` }
+  }
+  if (!/table\.has\(route\.path\)\) throw new Error/.test(host.webServerText)) {
+    return {
+      ok: false,
+      detail: `register (${host.webServerPath}:${register.line}) no longer throws on a duplicate path — our effect disposer is the only thing keeping re-activation safe`,
+    }
+  }
+  return { ok: true, detail: `${host.webServerPath}:${register.line} register({kind, path, handler}) returns a disposer` }
+})
+
+check('an exact route still outranks the /api origin fence', (host) => {
+  // Recorded because it is a decision, not an accident. The config route
+  // carries no secrets, so it needs no fence; but that is only true while the
+  // route stays a single GET of non-sensitive values. If DSH ever changes
+  // precedence so exact routes fall *inside* the fence, the values become
+  // unreadable from a page reached by name — dshmarket hit the opposite
+  // problem (#729) and wrote `useTrustedHosts` to work around it.
+  const register = locate(host.webServerText, /register\(route\) \{/)
+  if (register === null) return { ok: false, detail: 'webServer.register is gone; re-derive the fence decision' }
+  if (!/^\s*exact = /m.test(host.webServerText) || !/^\s*prefixes = /m.test(host.webServerText)) {
+    return { ok: false, detail: `the exact/prefix tables (${host.webServerPath}) are gone; precedence is unknown` }
+  }
+  return {
+    ok: true,
+    detail: `exact and prefix tables still separate (${host.webServerPath}:${register.line}); the config route stays outside the /api fence by design`,
+  }
+})
+
 /** @param {string} path */
 function readFileSyncUtf8(path) {
   return readFileSync(path, 'utf8')
@@ -330,6 +377,8 @@ try {
     modulesText: archive.read(`${CLIENT_MODULES}/index.js`),
     clientPath: `${CLIENT_MODULES}/client.js`,
     clientText: archive.read(`${CLIENT_MODULES}/client.js`),
+    webServerPath: `${HOST_WEB_SERVER}`,
+    webServerText: archive.read(HOST_WEB_SERVER),
   }
   for (const { name, run } of checks) {
     try {

@@ -26,6 +26,12 @@ const FIXTURE = conversationFixture([
 const bundle = await readFile(join(ROOT, 'client', 'client.js'), 'utf8')
 const run = activateBundle(bundle, { fixtureHtml: FIXTURE })
 
+// Activation is asynchronous: the client half asks the host for its config
+// before it builds the seam, so everything below has to wait for that. Without
+// this the script reports a plugin that "activated" and enhanced nothing,
+// which is the one answer it exists to disprove.
+const ready = await run.whenReady()
+
 process.stdout.write(`boot marker      : ${run.bootMarker}\n`)
 
 if (!run.applied.ok) {
@@ -37,8 +43,17 @@ if (!run.applied.ok) {
   process.stdout.write(`apply()          : ok\n`)
   process.stdout.write(`enhanced blocks  : ${run.switches}\n`)
   process.stdout.write(`__DSH_VIEWER_KIT__: ${run.hook}\n`)
+  process.stdout.write(`config source    : ${run.live()?.configSource ?? '(no hook)'}\n`)
   process.stdout.write(`effects registered: ${run.effects.map((effect) => effect.label).join(', ') || '(none)'}\n`)
   if (run.log.length > 0) process.stdout.write(`log              : ${run.log.join(' | ')}\n`)
+
+  // `switches` and `hook` are live getters, so they must be sampled BEFORE
+  // unload — afterwards they correctly read "nothing left", which is the point
+  // of the disposal assertions below but would make these two look like
+  // failures.
+  const enhanced = run.switches
+  const hookPresent = run.hook
+  const effectCount = run.effects.length
 
   run.unload()
   const afterUnload = run.env.document.querySelectorAll('[data-dvk-switch]').length
@@ -46,9 +61,10 @@ if (!run.applied.ok) {
   process.stdout.write(`after unload     : ${afterUnload} switch(es), ${stylesAfter} style tag(s)\n`)
 
   const problems = []
-  if (run.switches === 0) problems.push('apply() did not enhance the fixture block')
-  if (run.hook !== 'object') problems.push('__DSH_VIEWER_KIT__ was not installed')
-  if (run.effects.length === 0) problems.push('no disposer was registered with ctx.effect')
+  if (ready !== true) problems.push('activation never finished — the config request did not settle')
+  if (enhanced === 0) problems.push('apply() did not enhance the fixture block')
+  if (hookPresent !== 'object') problems.push('__DSH_VIEWER_KIT__ was not installed')
+  if (effectCount === 0) problems.push('no disposer was registered with ctx.effect')
   if (afterUnload !== 0) problems.push('unload left our nodes behind')
   if (stylesAfter !== 0) problems.push('unload left our stylesheet behind')
   if (problems.length > 0) {

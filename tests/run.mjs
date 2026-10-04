@@ -742,9 +742,10 @@ await test('apply() survives a strict ctx that throws on undocumented members', 
   eq(run.violations, [], 'it never read a ctx member outside get/effect/on/provide')
 })
 
-await test('apply() actually enhances a block — no silent per-block failure', () => {
+await test('apply() actually enhances a block — no silent per-block failure', async () => {
   const run = activateBundle(BUNDLE, { fixtureHtml: ACTIVATION_FIXTURE })
   assert(run.applied.ok, 'apply() did not throw')
+  assert(await run.whenReady(), 'activation never reached the point of building a seam')
   // A thrown translator used to be swallowed by the seam's per-block try/catch,
   // which looked exactly like "no renderer claimed this".
   eq(run.log.filter((line) => line.startsWith('ERROR')), [], 'nothing was logged as an error')
@@ -767,17 +768,19 @@ await test('the locale registration is ours to release', () => {
   assert(typeof unregister === 'function', 'the namespace was released on unload')
 })
 
-await test('a host that already carries our namespace does not fail the entry', () => {
+await test('a host that already carries our namespace does not fail the entry', async () => {
   const locale = createLocaleService()
   locale.register('dsh-viewer-kit', { en: { 'view.code': 'Code' }, zh: { 'view.code': '代码' } })
   const run = activateBundle(BUNDLE, { fixtureHtml: ACTIVATION_FIXTURE, services: { locale } })
   assert(run.applied.ok, `apply() threw: ${run.applied.error?.message}`)
+  assert(await run.whenReady(), 'activation never reached the point of building a seam')
   eq(run.switches, 1, 'still enhances with a pre-registered namespace')
 })
 
-await test('a claimed block opens in preview without any click', () => {
+await test('a claimed block opens in preview without any click', async () => {
   const run = activateBundle(BUNDLE, { fixtureHtml: ACTIVATION_FIXTURE })
   eq(run.applied.ok, true, 'apply() did not throw')
+  assert(await run.whenReady(), 'activation never reached the point of building a seam')
   eq(run.mode(), 'preview', 'the block is in preview mode on arrival')
   assert(run.env.document.querySelector('iframe') !== null, 'the preview is already mounted')
   // The default mode measures, so the outer frame carries a script. The model's
@@ -794,8 +797,9 @@ await test('a claimed block opens in preview without any click', () => {
   eq(sw.children[1].getAttribute('aria-pressed'), 'false', 'code is not pressed')
 })
 
-await test('switching to code drops the preview and leaves the source intact', () => {
+await test('switching to code drops the preview and leaves the source intact', async () => {
   const run = activateBundle(BUNDLE, { fixtureHtml: ACTIVATION_FIXTURE })
+  assert(await run.whenReady(), 'activation never reached the point of building a seam')
   const sw = run.env.document.querySelector('[data-dvk-switch]')
   sw.children[1].dispatch('click')
 
@@ -809,7 +813,80 @@ await test('switching to code drops the preview and leaves the source intact', (
   assert(run.env.document.querySelector('iframe') !== null, 'preview remounted')
 })
 
-await test('the row config reaches apply and can restore the code-first default', () => {
+/**
+ * Stand in for the host half's `GET /dsh-viewer-kit/config`.
+ *
+ * Returns a `fetch` that answers one JSON object, so a test can drive the real
+ * bridge rather than the shortcut below it.
+ *
+ * @param {Record<string, unknown> | null} body
+ * @returns {(url: string, init?: object) => Promise<{ ok: boolean, status: number, json: () => Promise<unknown> }>}
+ */
+function hostSays(body) {
+  return (url, init) => {
+    hostConfigRequests.push(url)
+    if (body === null) return Promise.resolve({ ok: false, status: 404 })
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) })
+  }
+}
+
+/** @type {string[]} */
+const hostConfigRequests = []
+
+await test('the host config route governs the first scan, not just later ones', async () => {
+  // The whole point of the bridge. Before it, a patch row's `config:` block
+  // stopped at the host fiber and every block rendered at the defaults.
+  const run = activateBundle(BUNDLE, {
+    fixtureHtml: ACTIVATION_FIXTURE,
+    fetch: hostSays({ defaultToPreview: false, htmlAllowScripts: true }),
+  })
+  assert(await run.whenReady(), 'activation never reached the point of building a seam')
+
+  eq(hostConfigRequests.length > 0, true, 'the client asked the host for its config')
+  eq(run.mode(), 'code', "the host's setting decided the very first view")
+  eq(run.env.document.querySelector('iframe'), null, 'nothing is previewed')
+  eq(run.live().configSource, 'host', 'the kit records where the config came from')
+  eq(run.live().kit.config().defaultToPreview, false, 'the kit reports the resolved config')
+})
+
+await test('a height the host sends is applied to the first render, with no jump', async () => {
+  // The reason the seam is built only after the config lands. If it were built
+  // first, this block would mount at 320 and then have to be re-negotiated.
+  const run = activateBundle(BUNDLE, {
+    fixtureHtml: ACTIVATION_FIXTURE,
+    fetch: hostSays({ maxPreviewHeight: 520 }),
+  })
+  assert(await run.whenReady(), 'activation never reached the point of building a seam')
+  eq(run.live().kit.config().maxPreviewHeight, 520, "the host's number survived the round trip")
+})
+
+await test('a config URL is resolved against the page, not the domain root', async () => {
+  // dshmarket shipped root-absolute fetches and had to fix them: under a path
+  // prefix, `/dsh-market/status` leaves the mount point entirely.
+  hostConfigRequests.length = 0
+  const run = activateBundle(BUNDLE, { fixtureHtml: ACTIVATION_FIXTURE, fetch: hostSays({}) })
+  assert(await run.whenReady(), 'activation never reached the point of building a seam')
+  const asked = hostConfigRequests[0] ?? ''
+  eq(asked.startsWith('/dsh-viewer-kit/config'), true, `asked for ${JSON.stringify(asked)}`)
+})
+
+await test('an absent host half renders with defaults rather than failing', async () => {
+  // The bundle has to keep working on its own: a 404 is what a host without
+  // this plugin's host half answers, and it must be indistinguishable from
+  // "everything is at its default".
+  const run = activateBundle(BUNDLE, { fixtureHtml: ACTIVATION_FIXTURE, fetch: hostSays(null) })
+  assert(await run.whenReady(), 'a 404 must still reach the scan')
+  eq(run.switches, 1, 'still enhances')
+  eq(run.mode(), 'preview', 'default view is preview')
+  eq(run.live().configSource, 'defaults', 'the kit says where the config came from')
+  assert(run.log.some((line) => line.includes('from defaults')), 'the log names the fallback')
+})
+
+await test('a row config, if one ever arrives, is used without a round trip', () => {
+  // A shortcut, not the production path: the boot wire carries no config, so
+  // this argument is always `undefined` in a browser today. It exists so a
+  // future DSH that starts sending one is picked up for free — and so
+  // `tools/probe-host.mjs` has somewhere to land when it does.
   const run = activateBundle(BUNDLE, {
     fixtureHtml: ACTIVATION_FIXTURE,
     rowConfig: { defaultToPreview: false },
@@ -820,7 +897,7 @@ await test('the row config reaches apply and can restore the code-first default'
   eq(run.live().kit.config().defaultToPreview, false, 'the kit reports the resolved config')
 })
 
-await test('the row config can turn on scripts for the html preview', () => {
+await test('a row config can turn on scripts for the html preview', () => {
   const run = activateBundle(BUNDLE, {
     fixtureHtml: ACTIVATION_FIXTURE,
     rowConfig: { htmlAllowScripts: true },
@@ -832,10 +909,43 @@ await test('the row config can turn on scripts for the html preview', () => {
   eq(run.live().kit.config().htmlAllowScripts, true, 'the kit reports the resolved config')
 })
 
-await test('a malformed row config degrades to defaults instead of failing the entry', () => {
-  // The client half exports no `Config` schema, so cordis forwards the row
-  // config unvalidated. A bad one must never fail the entry — a failed entry
-  // is a failed web boot.
+await test('a config the client half cannot use degrades to defaults', async () => {
+  // The two halves are strict/lenient on purpose. The host rejects a bad value
+  // loudly, so a value the client cannot accept means the two disagree — and
+  // defaults are a working answer where throwing would be a failed web boot.
+  // Each case names the key it is about, so a regression points at one field.
+  const cases = [
+    { body: { maxPreviewHeight: 'tall' }, key: 'maxPreviewHeight', expected: 320 },
+    { body: { maxPreviewHeight: 0 }, key: 'maxPreviewHeight', expected: 320 },
+    { body: { maxPreviewHeight: -5 }, key: 'maxPreviewHeight', expected: 320 },
+    { body: { chartHeight: 0 }, key: 'chartHeight', expected: 360 },
+    { body: { chartHeight: 'big' }, key: 'chartHeight', expected: 360 },
+    { body: { previewHeightMode: 'stretch' }, key: 'previewHeightMode', expected: 'measure' },
+    { body: { defaultToPreview: 'yes' }, key: 'defaultToPreview', expected: true },
+    { body: { enabled: 1 }, key: 'enabled', expected: true },
+    { body: { maxSourceBytes: 10.5 }, key: 'maxSourceBytes', expected: 262144 },
+    { body: { disabledRendererIds: 'html' }, key: 'disabledRendererIds', expected: 0 },
+  ]
+  for (const { body, key, expected } of cases) {
+    const run = activateBundle(BUNDLE, { fixtureHtml: ACTIVATION_FIXTURE, fetch: hostSays(body) })
+    assert(await run.whenReady(), `activation stalled for ${JSON.stringify(body)}`)
+    const actual = key === 'disabledRendererIds' ? run.live().kit.config()[key].length : run.live().kit.config()[key]
+    eq(actual, expected, `${key} from ${JSON.stringify(body)}`)
+  }
+  // A good value in the same object must survive alongside a bad one, or the
+  // lenient path would be "ignore the whole config" in disguise.
+  const mixed = activateBundle(BUNDLE, {
+    fixtureHtml: ACTIVATION_FIXTURE,
+    fetch: hostSays({ maxPreviewHeight: 'tall', defaultToPreview: false }),
+  })
+  assert(await mixed.whenReady(), 'activation stalled')
+  eq(mixed.live().kit.config().maxPreviewHeight, 320, 'the bad key fell back')
+  eq(mixed.live().kit.config().defaultToPreview, false, 'the good key was kept')
+})
+
+await test('a malformed row config degrades to defaults instead of failing the entry', async () => {
+  // Whichever path a bad value arrives by, the entry must survive — a failed
+  // entry is a failed web boot.
   const cases = [
     null,
     'not-an-object',
@@ -846,6 +956,7 @@ await test('a malformed row config degrades to defaults instead of failing the e
   for (const rowConfig of cases) {
     const run = activateBundle(BUNDLE, { fixtureHtml: ACTIVATION_FIXTURE, rowConfig })
     eq(run.applied.ok, true, `apply() survived rowConfig=${JSON.stringify(rowConfig)}`)
+    assert(await run.whenReady(), `activation stalled for rowConfig=${JSON.stringify(rowConfig)}`)
     eq(run.switches, 1, 'still enhances')
     // Wrong-typed fields fall back to the shipped default rather than breaking.
     eq(run.live().kit.config().defaultToPreview, true, 'defaultToPreview fell back to true')
@@ -854,8 +965,9 @@ await test('a malformed row config degrades to defaults instead of failing the e
   eq({}.polluted, undefined, 'no prototype pollution leaked out')
 })
 
-await test('preview mounts from the shipped bundle and unload restores the page', () => {
+await test('preview mounts from the shipped bundle and unload restores the page', async () => {
   const run = activateBundle(BUNDLE, { fixtureHtml: ACTIVATION_FIXTURE })
+  assert(await run.whenReady(), 'activation never built a seam')
   const sw = run.env.document.querySelector('[data-dvk-switch]')
   assert(sw !== null, 'view switch present')
   assert(run.env.document.querySelector('iframe') !== null, 'preview mounts')
@@ -865,34 +977,66 @@ await test('preview mounts from the shipped bundle and unload restores the page'
   eq(run.env.document.querySelector('style[data-plugin="dsh-viewer-kit"]'), null, 'our stylesheet is gone')
 })
 
-await test('unload leaves the native code block byte-identical', () => {
+await test('unloading while the config is still in flight does not resurrect the plugin', async () => {
+  // A race the async bridge introduced. DSH can unload an entry while the
+  // config request is outstanding; the answer then arrives into an activation
+  // that no longer exists. Without the `disposed` guard in `start`, that
+  // answer would build a seam, append a switch, and never be cleaned up — a
+  // plugin that survives its own disposal.
+  let release
+  const run = activateBundle(BUNDLE, {
+    fixtureHtml: ACTIVATION_FIXTURE,
+    fetch: () =>
+      new Promise((done) => {
+        release = () => done({ ok: true, status: 200, json: () => Promise.resolve({ maxPreviewHeight: 400 }) })
+      }),
+  })
+
+  eq(run.switches, 0, 'nothing is enhanced while the config is outstanding')
+  run.unload()
+  release()
+  for (let attempt = 0; attempt < 30; attempt++) await new Promise((done) => setTimeout(done, 0))
+
+  eq(run.switches, 0, 'the late answer did not build a seam')
+  eq(run.env.document.querySelector('iframe'), null, 'and mounted no preview')
+  eq(run.hook, 'undefined', 'the diagnostic hook stayed gone')
+  eq(run.log.filter((line) => line.startsWith('ERROR')), [], 'and logged nothing alarming')
+})
+
+await test('unload leaves the native code block byte-identical', async () => {
   const run = activateBundle(BUNDLE, { fixtureHtml: ACTIVATION_FIXTURE })
+  assert(await run.whenReady(), 'activation never built a seam')
   run.unload()
   const pre = run.env.document.querySelector('[data-code-block-content] pre')
   eq(pre.textContent, HTML_SAMPLE, 'source untouched')
   eq(run.env.document.querySelector('[data-code-block-content]').getAttribute('data-dvk-mode'), null, 'our attribute removed')
 })
 
-await test('re-activating retires the previous activation instead of stacking switches', () => {
+await test('re-activating retires the previous activation instead of stacking switches', async () => {
   // DSH re-materialises a client bundle on HMR and on re-enable. Two live
   // activations each build their own seam with their own element bookkeeping,
   // so both would append a switch to every block — which is exactly the row of
-  // duplicate buttons this guards against.
+  // duplicate buttons this guards against. The re-activation is also async now,
+  // so the assertion has to wait for the second seam to exist before counting.
   const run = activateBundle(BUNDLE, { fixtureHtml: ACTIVATION_FIXTURE })
+  assert(await run.whenReady(), 'first activation never built a seam')
   eq(run.switches, 1, 'first activation: one switch')
 
   run.loaded.apply(run.ctx)
+  assert(await run.whenReady(), 'second activation never built a seam')
   eq(run.switches, 1, 'second activation must not add a second switch')
   eq(run.env.document.querySelectorAll('style[data-plugin="dsh-viewer-kit"]').length, 1, 'exactly one stylesheet')
 
   run.loaded.apply(run.ctx)
   run.loaded.apply(run.ctx)
+  assert(await run.whenReady(), 'fourth activation never built a seam')
   eq(run.switches, 1, 'still exactly one switch after four activations')
   eq(run.env.document.querySelectorAll('style[data-plugin="dsh-viewer-kit"]').length, 1, 'still one stylesheet')
 })
 
-await test('a stray switch left in a banner is cleared before ours is added', () => {
+await test('a stray switch left in a banner is cleared before ours is added', async () => {
   const run = activateBundle(BUNDLE, { fixtureHtml: ACTIVATION_FIXTURE })
+  assert(await run.whenReady(), 'first activation never built a seam')
   const content = run.env.document.querySelector('[data-code-block-content]')
   const banner = run.env.document.querySelector('[data-code-block-banner]')
 
@@ -913,6 +1057,7 @@ await test('a stray switch left in a banner is cleared before ours is added', ()
 
   // Re-activation retires the old seam, then a fresh scan re-claims the block.
   run.loaded.apply(run.ctx)
+  assert(await run.whenReady(), 'the re-activation never rebuilt the seam')
 
   eq(run.env.document.querySelectorAll('[data-dvk-switch]').length, 1, 'back to exactly one switch')
   eq(run.env.document.querySelectorAll('[data-dvk-root]').length, 1, 'back to exactly one view root')
@@ -920,9 +1065,10 @@ await test('a stray switch left in a banner is cleared before ours is added', ()
   eq(run.env.document.querySelector('[data-stray="root"]'), null, 'the stray root was the one removed')
 })
 
-await test('a host without a locale service still activates', () => {
+await test('a host without a locale service still activates', async () => {
   const run = activateBundle(BUNDLE, { fixtureHtml: ACTIVATION_FIXTURE, withLocale: false })
   assert(run.applied.ok, 'apply() did not throw without a locale service')
+  assert(await run.whenReady(), 'activation never built a seam')
   eq(run.switches, 1, 'still enhances')
   eq(run.effects.map((effect) => effect.label), ['dsh-viewer-kit: dispose'], 'only our own disposer')
 })
@@ -933,6 +1079,128 @@ await test('the built bundle is syntactically loadable as a classic script', () 
   assert(bundle.includes('exports.apply'), 'exports apply')
   assert(!/\nimport\s/.test(bundle), 'no ESM import statements leaked into the output')
   assert(!/\nexport\s/.test(bundle), 'no ESM export statements leaked into the output')
+})
+
+// ---------------------------------------------------------------------------
+// the host -> client config bridge
+//
+// The configuration a user writes in `cordis.patch.yml` lands on the HOST
+// fiber; rendering happens in the browser; the boot wire carries no config. So
+// the host publishes it over one HTTP route and the client fetches it before
+// its first scan. `loadHostConfig` is tested here as a plain function, with its
+// clock and network injected, because the interesting failures — a hanging
+// request, a body that is not a config — are exactly the ones a fake timer can
+// reproduce deterministically and a live activation cannot.
+// ---------------------------------------------------------------------------
+
+const { loadHostConfig, configUrl, CONFIG_PATH, CONFIG_TIMEOUT_MS } = await import(
+  '../src/client/host-config.js'
+)
+const { patchDocumentation, Config: require$schema, DEFAULT_CONFIG: SCHEMA_DEFAULTS } = await import(
+  '../src/schema.js'
+)
+
+/**
+ * A `setTimeout` that never fires, so the success paths are not raced by the
+ * timeout branch. A real 1200ms wait is not the point of those tests, and a
+ * timer that fires on the next microtask would beat a fetch that needs two
+ * turns — the timeout would win and every good answer would read as a failure.
+ */
+const neverTimer = () => 0
+
+/** A `setTimeout` that runs its callback on the next microtask. */
+const instantTimer = (callback) => {
+  Promise.resolve().then(callback)
+  return 1
+}
+
+await test('a good answer is used, and says it came from the host', async () => {
+  const result = await loadHostConfig({
+    fetch: () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ chartHeight: 500 }) }),
+    setTimeout: neverTimer,
+    clearTimeout: () => {},
+  })
+  eq(result.source, 'host', 'source')
+  eq(result.config.chartHeight, 500, 'the value survived')
+  eq(result.config.maxPreviewHeight, 320, 'absent keys still get defaults')
+})
+
+await test('a hanging request gives up rather than blocking the first render', async () => {
+  // The whole reason there is a timeout. A wedged web server must not leave the
+  // user looking at unenhanced code blocks, which is the thing this plugin
+  // exists to prevent.
+  let aborted = false
+  const result = await loadHostConfig({
+    fetch: (url, init) =>
+      new Promise(() => {
+        init?.signal?.addEventListener?.('abort', () => {
+          aborted = true
+        })
+      }),
+    setTimeout: instantTimer,
+    clearTimeout: () => {},
+    timeoutMs: 25,
+  })
+  eq(result.source, 'defaults', 'fell back')
+  eq(result.config.maxPreviewHeight, 320, 'with the shipped defaults')
+  assert(String(result.reason).includes('no answer'), `reason names the timeout, got ${result.reason}`)
+  eq(aborted, true, 'the in-flight request was aborted rather than left running')
+})
+
+await test('every failure mode resolves to defaults instead of rejecting', async () => {
+  // `apply` awaits this, and a rejection that escaped would leave the plugin
+  // dead with no seam at all. Each case is a way the real route can go wrong.
+  const cases = [
+    ['404 from a host with no host half', () => Promise.resolve({ ok: false, status: 404 }), 'host answered 404'],
+    ['500 from a crashing handler', () => Promise.resolve({ ok: false, status: 500 }), 'host answered 500'],
+    ['a network failure', () => Promise.reject(new Error('ECONNREFUSED')), 'request failed'],
+    ['a body that is not JSON', () => Promise.resolve({ ok: true, status: 200, json: () => Promise.reject(new Error('bad json')) }), 'unexpected'],
+    ['a JSON array', () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([1, 2]) }), 'not a config object'],
+    ['a JSON null', () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(null) }), 'not a config object'],
+  ]
+  for (const [name, fetch, expectedReason] of cases) {
+    const result = await loadHostConfig({ fetch, setTimeout: neverTimer, clearTimeout: () => {} })
+    eq(result.source, 'defaults', `${name}: source`)
+    eq(result.config.maxPreviewHeight, 320, `${name}: kept the default`)
+    assert(String(result.reason).includes(expectedReason), `${name}: reason was ${result.reason}`)
+  }
+})
+
+await test('a runtime with no fetch still renders', async () => {
+  // `options.fetch ?? globalThis.fetch` means passing `undefined` here would
+  // silently fall back to Node's own fetch and test nothing. The runtime is
+  // made fetch-less the way a browser without it would be.
+  const saved = Object.getOwnPropertyDescriptor(globalThis, 'fetch')
+  Object.defineProperty(globalThis, 'fetch', { value: undefined, configurable: true, writable: true })
+  try {
+    const result = await loadHostConfig({ setTimeout: neverTimer })
+    eq(result.source, 'defaults', 'source')
+    assert(String(result.reason).includes('no fetch'), `reason was ${result.reason}`)
+  } finally {
+    if (saved === undefined) delete globalThis.fetch
+    else Object.defineProperty(globalThis, 'fetch', saved)
+  }
+})
+
+await test('the config URL is document-relative, never root-absolute', () => {
+  // The bug dshmarket shipped and fixed: a root-absolute request leaves the
+  // mount point as soon as the app is served under a prefix. `configUrl`
+  // strips the leading slash and resolves against `document.baseURI`.
+  const saved = globalThis.document
+  try {
+    globalThis.document = { baseURI: 'https://host:19387/dsh/ui/' }
+    eq(configUrl(), '/dsh/ui/dsh-viewer-kit/config', 'resolved under the mount point')
+    eq(configUrl(), configUrl(), 'stable')
+    globalThis.document = { baseURI: 'https://host:19387/' }
+    eq(configUrl(), '/dsh-viewer-kit/config', 'a root deployment is unchanged')
+    globalThis.document = { baseURI: undefined }
+    eq(configUrl(), '/dsh-viewer-kit/config', 'no baseURI falls back to root')
+  } finally {
+    if (saved === undefined) delete globalThis.document
+    else globalThis.document = saved
+  }
+  assert(CONFIG_PATH.startsWith('/'), 'the host-registered path stays root-absolute on purpose')
+  assert(CONFIG_TIMEOUT_MS > 0 && CONFIG_TIMEOUT_MS < 5000, `a bounded wait, got ${CONFIG_TIMEOUT_MS}`)
 })
 
 // ---------------------------------------------------------------------------
@@ -1508,11 +1776,12 @@ await test('the generic label is reported as "no language", not as a language ca
 
 process.stdout.write('\ndocs (README quotes must still be true)\n')
 
-await test('the README quotes the console lines the bundle actually emits', () => {
+await test('the README quotes the console lines the bundle actually emits', async () => {
   const readme = readFileSync(join(ROOT, 'README.md'), 'utf8')
   const run = activateBundle(BUNDLE, { fixtureHtml: ACTIVATION_FIXTURE })
+  assert(await run.whenReady(), 'activation never finished, so the log is incomplete')
   const emitted = run.log.filter((line) => line.startsWith('[dsh-viewer-kit]'))
-  assert(emitted.length >= 3, `expected the three startup lines, saw ${emitted.length}`)
+  assert(emitted.length >= 4, `expected the four startup lines, saw ${emitted.length}`)
 
   for (const line of emitted) {
     // The count is live, so the README writes it as a placeholder.
@@ -1521,8 +1790,28 @@ await test('the README quotes the console lines the bundle actually emits', () =
   }
 })
 
-await test('the README quotes the current version and tarball name', () => {
-  const manifest = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+await test('the shipped patch documents every option, generated from the schema', () => {
+  // `cordis.patch.yml` is where a user looks to find out what can be set, and
+  // it is generated from the same field table the validators walk — so an option
+  // cannot be documented without existing, or exist without being explained.
+  const patch = readFileSync(join(ROOT, 'cordis.patch.yml'), 'utf8')
+  // Two levels deep: the options live under `config:`, which is under `- id:`.
+  const generated = patchDocumentation('        ')
+  assert(patch.includes(generated), 'the generated option block is missing or stale in cordis.patch.yml')
+
+  // And the reverse direction, which a substring check cannot give: every
+  // shipped option appears in the generated block with its own default.
+  for (const [key, value] of Object.entries(SCHEMA_DEFAULTS)) {
+    assert(patch.includes(`        ${key}: ${JSON.stringify(value)}`), `cordis.patch.yml is missing "${key}"`)
+  }
+  eq(Object.keys(SCHEMA_DEFAULTS).length, 8, 'eight options, and the patch documents exactly those')
+  eq(require$schema['~standard'].validate({}).issues, undefined, 'an empty config is valid')
+  const bad = require$schema['~standard'].validate({ maxPreviewHeight: 'tall' })
+  assert(Array.isArray(bad.issues) && bad.issues.length > 0, 'a bad value is an issue, not a value')
+  eq(bad.issues[0].path, ['maxPreviewHeight'], 'the issue names the key')
+})
+
+await test('the README quotes the current version and tarball name', () => {  const manifest = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
   const readme = readFileSync(join(ROOT, 'README.md'), 'utf8')
   assert(readme.includes(`v${manifest.version} active`), `the README does not quote v${manifest.version}`)
   assert(

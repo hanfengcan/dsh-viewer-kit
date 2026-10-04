@@ -162,11 +162,30 @@ if (typeof clientRel !== 'string') {
 }
 
 // --- 3. the host half actually loads ----------------------------------------
+//
+// `import()` is the check, not a file listing. The host half is copied verbatim
+// with no bundler, so `./schema.js` is resolved by Node at activation time from
+// the installed package directory: a `lib/schema.js` that never made it into
+// the tarball is not a build warning here, it is `ERR_MODULE_NOT_FOUND` on the
+// entry DSH loads, and the whole plugin — config route included — never starts.
 if (typeof mainRel === 'string' && existsSync(join(PKG_DIR, mainRel))) {
   try {
     const host = await import(pathToFileURL(join(PKG_DIR, mainRel)).href)
     if (typeof host.apply !== 'function') problems.push(`${mainRel} does not export apply()`)
     else ok(`${mainRel} exports apply()`)
+    // A `Config` export is what makes an invalid patch row fail loudly instead
+    // of being silently ignored. Its absence is not fatal — a host that stops
+    // honouring it would still serve the route — so it is reported, not fatal.
+    if (host.Config?.['~standard']?.version !== 1) {
+      problems.push(`${mainRel} does not export a Standard Schema v1 "Config"`)
+    } else {
+      const bad = host.Config['~standard'].validate({ maxPreviewHeight: 'tall' })
+      if (!Array.isArray(bad.issues) || bad.issues.length === 0) {
+        problems.push('the exported Config schema accepted maxPreviewHeight: "tall"')
+      } else {
+        ok(`${mainRel} exports a Config schema that rejects a bad value (${bad.issues[0].message})`)
+      }
+    }
   } catch (error) {
     problems.push(`${mainRel} failed to import: ${error.message}`)
   }
@@ -180,12 +199,22 @@ if (typeof clientRel === 'string' && existsSync(join(PKG_DIR, clientRel))) {
       { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) },
     ]),
   })
+  // Activation is asynchronous now: the client asks the host for its config
+  // before it builds the seam. Reading `switches` without waiting reports zero
+  // and would fail a perfectly good package.
+  const ready = await run.whenReady()
   if (!run.applied.ok) {
     problems.push(`the shipped bundle threw during apply(): ${run.applied.error?.message}`)
+  } else if (ready !== true) {
+    problems.push('the shipped bundle never finished activating — the config request did not settle')
   } else if (run.switches !== 1) {
     problems.push(`the shipped bundle enhanced ${run.switches} blocks, expected 1`)
   } else if (run.violations.length > 0) {
     problems.push(`the shipped bundle read an undocumented ctx member: ${run.violations[0]}`)
+  } else if (run.live()?.configSource !== 'defaults') {
+    // Nothing serves the config route in a bare activation, so this is the
+    // honest expectation: it proves the 404 path degrades instead of dying.
+    problems.push(`the shipped bundle reported config source ${run.live()?.configSource}, expected "defaults"`)
   } else {
     ok('the shipped client bundle activates under a strict ctx and enhances a fixture block')
   }

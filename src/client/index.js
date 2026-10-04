@@ -27,9 +27,10 @@
  */
 
 import { createDomSeam } from './dom-seam.js'
+import { loadHostConfig } from './host-config.js'
 import { createEChartsRenderer } from './renderers/echarts.js'
 import { createHtmlRenderer } from './renderers/html.js'
-import { createKit } from './kit.js'
+import { createKit, resolveConfig } from './kit.js'
 import { createTableRenderer } from './renderers/table.js'
 import { createTranslator } from './locale.js'
 import { installStyles } from './styles.js'
@@ -42,6 +43,12 @@ const VERSION = '0.9.0'
  * See the guard inside `apply`.
  */
 const LIVE_HANDLE = '__DSH_VIEWER_KIT_DISPOSE__'
+
+/**
+ * Handle to the self-check hook, kept in a named constant so disposal can
+ * check it is deleting its own object and not a newer activation's.
+ */
+const DIAGNOSTIC_HANDLE = '__DSH_VIEWER_KIT__'
 
 /**
  * Every renderer the kit ships with, in one place.
@@ -84,17 +91,13 @@ globalThis.__DSH_VIEWER_KIT_BOOTED__ = VERSION
  *   get: (name: string) => unknown,
  *   effect: (callback: () => unknown, label?: string) => unknown,
  * }} ctx
- * @param {Partial<import('./contract.js').ViewerKitConfig>} [rowConfig]
- *   The loader row's `config` block, verbatim.
- *
- *   Cordis only validates against a `Config` schema when the plugin exports
- *   one (`resolveConfig` in `@deepseek-ai/cordis`: `if (!runtime.Config) return
- *   config`), and this half deliberately exports none — importing schemastery
- *   into a client bundle would have to resolve through the module seed table.
- *   So the row config arrives unvalidated and goes through `resolveConfig`,
- *   which drops unknown keys and type-checks every value against the defaults.
- *   A malformed config therefore degrades to defaults instead of failing the
- *   entry, which matters: a failed entry is a failed web boot.
+ * @param {Record<string, unknown>} [rowConfig]
+ *   Unused, and deliberately so. The boot wire carries no config: `graphRow()`
+ *   in `dsh-client-modules` emits `{id, url, rev, inject?, immediately?,
+ *   external?}` and `parseBootManifest()` reads back exactly those fields, so
+ *   this parameter is always `undefined`. Configuration arrives from the host
+ *   half over `GET /dsh-viewer-kit/config` instead — see `host-config.js`. The
+ *   parameter is kept because it is the documented hook signature.
  *
  * @returns {() => void} disposer
  */
@@ -134,18 +137,6 @@ export function apply(ctx, rowConfig) {
     },
   })
 
-  // Before anything is registered or negotiated, so the row config governs the
-  // very first scan. `resolveConfig` fills every absent key from the defaults.
-  kit.setConfig(rowConfig)
-  const settings = kit.config()
-  log.log(
-    `[${NAMESPACE}] config: default view=${settings.defaultToPreview ? 'preview' : 'code'}` +
-      `, html scripts=${settings.htmlAllowScripts ? 'on' : 'off'}` +
-      `, max preview height=${settings.maxPreviewHeight}px` +
-      `, chart height=${settings.chartHeight}px` +
-      (settings.disabledRendererIds.length > 0 ? `, disabled renderers=${settings.disabledRendererIds.join(',')}` : ''),
-  )
-
   teardown.push(...RENDERER_FACTORIES.map((factory) => kit.register(factory(t))))
   log.log(`[${NAMESPACE}] renderers: ${kit.renderers().map((renderer) => renderer.id).join(', ')}`)
 
@@ -154,32 +145,82 @@ export function apply(ctx, rowConfig) {
   // the note in locale.js for why parking it on `ctx.effect` crashed DSH.
   teardown.push(translator.dispose)
 
-  const seam = createDomSeam({
-    kit,
-    t,
-    document: doc,
-    root: doc.body,
-    MutationObserver: globalThis.MutationObserver,
-  })
-  seam.scan()
-  teardown.push(() => seam.dispose())
-
-  // Self-check hook. `diagnose()` is the one command that separates the three
-  // ways this can be "installed but not rendering": the client half never
-  // loaded, the seam found no code blocks, or it found blocks no renderer
-  // claims. `__DSH_VIEWER_KIT__` being undefined means `apply` never finished.
-  globalThis.__DSH_VIEWER_KIT__ = {
-    version: VERSION,
-    kit,
-    seam,
-    stats: () => ({ ...kit.stats(), live: seam.size() }),
-    diagnose: () => ({ version: VERSION, renderers: kit.renderers().map((r) => r.id), ...seam.diagnose() }),
+  const report = (settings, source) => {
+    log.log(
+      `[${NAMESPACE}] config: default view=${settings.defaultToPreview ? 'preview' : 'code'}` +
+        `, html scripts=${settings.htmlAllowScripts ? 'on' : 'off'}` +
+        `, max preview height=${settings.maxPreviewHeight}px` +
+        `, chart height=${settings.chartHeight}px` +
+        (settings.disabledRendererIds.length > 0 ? `, disabled renderers=${settings.disabledRendererIds.join(',')}` : '') +
+        ` (from ${source})`,
+    )
   }
-  teardown.push(() => {
-    delete globalThis.__DSH_VIEWER_KIT__
-  })
 
-  log.log(`[${NAMESPACE}] v${VERSION} active — ${seam.size()} code block(s) enhanced`)
+  /**
+   * Build the seam and scan, once the settings are known.
+   *
+   * Nothing is observed before this runs — `createDomSeam` attaches its
+   * MutationObserver at construction, so constructing it early would let a
+   * block be negotiated with default settings and then disagree with the
+   * settings that arrive a moment later. Deferring the whole seam is what
+   * makes the first render the final one.
+   *
+   * @param {{ config: Record<string, any>, source: string, reason?: string }} loaded
+   */
+  const start = (loaded) => {
+    if (disposed) return
+    kit.setConfig(loaded.config)
+    const settings = kit.config()
+    report(settings, loaded.source === 'host' ? 'host' : `defaults, ${loaded.reason ?? 'no host config'}`)
+
+    const seam = createDomSeam({
+      kit,
+      t,
+      document: doc,
+      root: doc.body,
+      MutationObserver: globalThis.MutationObserver,
+    })
+    seam.scan()
+    teardown.push(() => seam.dispose())
+
+    // Self-check hook. `diagnose()` is the one command that separates the three
+    // ways this can be "installed but not rendering": the client half never
+    // loaded, the seam found no code blocks, or it found blocks no renderer
+    // claims. `__DSH_VIEWER_KIT__` being undefined means `apply` never finished.
+    globalThis[DIAGNOSTIC_HANDLE] = {
+      version: VERSION,
+      kit,
+      seam,
+      configSource: loaded.source,
+      stats: () => ({ ...kit.stats(), live: seam.size() }),
+      diagnose: () => ({
+        version: VERSION,
+        renderers: kit.renderers().map((r) => r.id),
+        configSource: loaded.source,
+        ...seam.diagnose(),
+      }),
+    }
+    teardown.push(() => {
+      if (globalThis[DIAGNOSTIC_HANDLE]?.version === VERSION) delete globalThis[DIAGNOSTIC_HANDLE]
+    })
+
+    log.log(`[${NAMESPACE}] v${VERSION} active — ${seam.size()} code block(s) enhanced`)
+  }
+
+  // `rowConfig` is documented above as always undefined; if a future DSH starts
+  // sending one, prefer it and skip the round trip entirely. Kept so the
+  // probe-host tripwire has somewhere to land.
+  if (rowConfig != null && typeof rowConfig === 'object') {
+    start({ config: resolveConfig(rowConfig), source: 'row' })
+  } else {
+    log.log(`[${NAMESPACE}] waiting for the host config route`)
+    void loadHostConfig().then(start, (error) => {
+      // `loadHostConfig` never rejects; this arm exists so a bug in it cannot
+      // silently leave the plugin dead.
+      log.error(`[${NAMESPACE}] config loading failed`, error)
+      start({ config: resolveConfig(undefined), source: 'defaults', reason: 'loader threw' })
+    })
+  }
 
   const dispose = () => {
     if (disposed) return
