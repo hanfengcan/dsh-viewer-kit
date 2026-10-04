@@ -192,12 +192,10 @@ export function createEChartsRenderer(t) {
           }
           if (root === null) return // disposed while the chunk was in flight
           // The chunk is a CommonJS module whose named export is `engine`, so
-          // `require.async` hands back `{ engine: { createChart } }`. Reading
-          // `createChart` off the top level reported "unexpected chunk shape"
-          // against a chunk that had in fact loaded and evaluated perfectly —
-          // which is the most expensive kind of bug, because everything up to
-          // it was working. Both shapes are accepted so a future export rename
-          // degrades to a working chart instead of a blank box.
+          // `require.async` hands back `{ engine: { createChart } }` — one level
+          // deeper than the obvious read. Both shapes are accepted, so a future
+          // export rename degrades to a working chart instead of a blank box
+          // whose cause is a chunk that loaded and evaluated perfectly.
           const engine = mod?.engine ?? mod
           if (engine == null || typeof engine.createChart !== 'function') {
             showProblem(

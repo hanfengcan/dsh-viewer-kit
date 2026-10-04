@@ -39,10 +39,10 @@ const FRAME_PADDING = 72
  * Slack applied to the estimate.
  *
  * An estimate that is too tall costs a little empty space; one that is too
- * short puts a scrollbar on content that nearly fits, which is the complaint
- * this was written to answer. Those are not equally annoying, so the number is
- * deliberately biased upward. It is a bias, not a measurement — see the note on
- * `estimateHeight` for why a real measurement is not available here.
+ * short puts a scrollbar on content that nearly fits. Those are not equally
+ * annoying, so the number is deliberately biased upward. It is a bias, not a
+ * measurement — see the note on `estimateHeight` for why a real measurement is
+ * not available here.
  */
 const SAFETY_FACTOR = 1.15
 

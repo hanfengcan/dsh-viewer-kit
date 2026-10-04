@@ -787,11 +787,10 @@ await test('enlarging a table lifts the cap in place, and only for that table', 
 })
 
 await test('a table that is not clipped offers no enlarge control', () => {
-  // The complaint this answers: the button appeared on every table and did
-  // nothing on a short one, because a table shorter than its cap is never
-  // clipped — removing the cap repaints no pixel. `layout` describes what the
-  // browser would compute, and it has to be set before mounting because the
-  // renderer is asked at mount time.
+  // A table shorter than its cap is never clipped, so removing the cap repaints
+  // no pixel and the control would be a no-op. `layout` describes what a browser
+  // would compute, and it has to be set BEFORE mounting because the renderer is
+  // asked at mount time.
   const table = createTableRenderer((_key, fallback) => fallback)
   const rows = conversationFixture([
     { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'csv', code: 'a,b\n1,2' }) },
@@ -833,9 +832,9 @@ await test('the enlarge control is an icon from DSH own set, not a text button',
 
 await test('the enlarge control has no styling of its own for its state', async () => {
   // A state rule and `:hover` have equal specificity, so whichever comes later
-  // wins. With `aria-expanded` synced and a rule keyed on it placed after the
-  // hover rule, the hover tint silently disappeared — reported from the real
-  // app as "hover 样式不见了". The fix is to own no state styling at all.
+  // wins. A rule keyed on the state, placed after the hover rule, makes the
+  // hover tint unreachable — silently, because both rules are individually
+  // valid. Owning no state styling at all is what makes that impossible.
   const { STYLES } = await import('../src/client/styles.js')
   const expandBlock = STYLES.slice(STYLES.indexOf('.dvk-expand {'))
   const rules = expandBlock.slice(0, expandBlock.indexOf('/* Enlarged preview'))
@@ -983,10 +982,9 @@ await test('the enlarge control is a sibling of the view switch, not one of its 
 })
 
 await test('closing the enlarged dialog with ESC clears the enlarge button', () => {
-  // The bug this fixes, reported from the real app: pressing the button stuck it
-  // in its pressed style forever. A modal dialog makes the page inert, so the
-  // button could not be pressed a second time to undo it — the reader leaves
-  // with ESC or a backdrop click, and the surface heard nothing about it.
+  // A modal dialog makes the page inert, so while it is open the button cannot
+  // be pressed a second time. The reader leaves with ESC or a backdrop click,
+  // and the surface only learns about it from the dialog's own `close` event.
   const { env } = mount(conversationFixture([
     { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) },
   ]))
@@ -1005,9 +1003,9 @@ await test('closing the enlarged dialog with ESC clears the enlarge button', () 
 })
 
 await test('every enlarge string exists in both dictionaries', async () => {
-  // Reported from the real app as "没有中文". A missing key does not fail
-  // loudly — `t` falls back to the English literal — so the only way to catch
-  // it is to ask the dictionary directly.
+  // A missing key does not fail loudly: `t` falls back to the English literal,
+  // so the UI silently shows the wrong language. Asking the dictionary directly
+  // is the only way this can fail.
   const { DICTIONARIES } = await import('../src/client/locale.js')
   for (const key of ['expand.label', 'html.modalTitle', 'html.modalClose']) {
     eq(typeof DICTIONARIES.en[key], 'string', `en is missing ${key}`)
@@ -2100,16 +2098,17 @@ await test('the generic label is reported as "no language", not as a language ca
 })
 
 // ---------------------------------------------------------------------------
-// the README quotes the product, so the product must still say those things
+// documentation guards, and the comment-hygiene guard
 //
-// This exists because the README drifted: it advertised `renderers: echarts,
-// html, table` when the bundle had long since logged `html, echarts, table`
-// (priority order, not registration order), listed the console lines in the
-// wrong sequence, and quoted test counts and a version that were several
-// releases stale. Every one of those is something a reader checks *first*, and
-// every one was wrong in a direction that looks like a broken install.
+// A README is a projection of the product, and it goes stale silently: nothing
+// fails when it quotes a console line the bundle stopped printing, a renderer
+// order that changed, or a test count from three releases ago. Every one of
+// those is something a reader checks *first*, and a wrong one reads as a broken
+// install rather than as a stale document. So each quoted fact is asserted
+// against the artifact that produces it.
 //
-// A guard rather than a one-time fix: the failure mode is silent by nature.
+// The comment-hygiene guard below is the same idea applied to source comments:
+// see AGENTS.md §4.1 for the rule it enforces.
 // ---------------------------------------------------------------------------
 
 process.stdout.write('\ndocs (README quotes must still be true)\n')
@@ -2163,18 +2162,26 @@ await test('the README states the exact number of tests this file declares', () 
   // known until the run completes and this check runs part-way through it — a
   // live count would make the assertion depend on where in the file it sits.
   //
-  // Exact, not "at least": the README drifted to 40 and 49 against a suite of
-  // 90, and an understated number is just as wrong as an overstated one to a
-  // reader deciding whether the project is tested. The cost is one README edit
-  // whenever the suite grows, which is the point.
+  // Exact, not "at least": an understated number is just as wrong as an
+  // overstated one to a reader deciding whether the project is tested. The cost
+  // is one edit whenever the suite grows, which is the point.
+  //
+  // AGENTS.md is checked by the same loop. It quotes the count in two places,
+  // and a contributor document that misstates the suite is the same defect as a
+  // README that does — with the added irony that AGENTS.md is where the rule
+  // against stale duplication is written down.
   const source = readFileSync(new URL(import.meta.url), 'utf8')
   const declared = (source.match(/^await test\(/gm) ?? []).length
-  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8')
-  const claims = [...readme.matchAll(/(\d+) 项测试/g)]
-  assert(claims.length > 0, 'the README states no test count')
-  for (const claim of claims) {
-    eq(Number(claim[1]), declared, `the README says ${claim[1]} tests; this file declares ${declared}`)
+  let checked = 0
+  for (const name of ['README.md', 'AGENTS.md']) {
+    const text = readFileSync(join(ROOT, name), 'utf8')
+    const claims = [...text.matchAll(/(\d+) 项测试/g)]
+    for (const claim of claims) {
+      eq(Number(claim[1]), declared, `${name} says ${claim[1]} tests; this file declares ${declared}`)
+      checked += 1
+    }
   }
+  assert(checked > 0, 'neither README.md nor AGENTS.md states a test count')
 })
 
 await test('every screenshot the README shows exists, and every screenshot is shown', () => {
@@ -2193,6 +2200,51 @@ await test('every screenshot the README shows exists, and every screenshot is sh
   const onDisk = readdirSync(join(ROOT, 'docs', 'imgs')).map((name) => `docs/imgs/${name}`)
   const orphans = onDisk.filter((path) => !shown.has(path))
   eq(orphans, [], `screenshots sitting in docs/imgs that the README never shows: ${orphans.join(', ')}`)
+})
+
+// ---------------------------------------------------------------------------
+// comment hygiene (AGENTS.md §4.1)
+//
+// A comment is read by someone who does not know the conversation that produced
+// it. Names for that conversation — who reported what, "the bug this fixes",
+// which review asked for it — turn a comment into an artefact of a moment that
+// has passed, and they crowd out the invariant that would still be true.
+//
+// The rule is a judgement call, so this guard only catches the unambiguous
+// phrasings. That is deliberate: a guard that tried to judge prose would be
+// either noisy or wrong, and both train people to ignore it.
+// ---------------------------------------------------------------------------
+
+/** Phrases that only make sense with the conversation as context. */
+const COMMENT_RESIDUE = /the bug this fixes|reported from the real app|the complaint this|user feedback|用户反馈|用户报告|上次踩|审查报告|as (?:we|I) discussed/i
+
+await test('source comments do not reference the conversation that produced them', () => {
+  // The guard has to be able to fail, or it is decoration. This asserts the
+  // detector works before trusting a clean scan — the same reason
+  // tests/probe-host.mjs carries a "faithful host" case.
+  eq(COMMENT_RESIDUE.test('// the bug this fixes: hover vanished'), true, 'the detector catches a known offender')
+  eq(COMMENT_RESIDUE.test('// A modal dialog makes the page inert'), false, 'and ignores an ordinary comment')
+
+  /** @type {string[]} */
+  const offenders = []
+  const roots = [join(ROOT, 'src'), join(ROOT, 'tools'), join(ROOT, 'scripts')]
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) walk(full)
+      else if (/\.m?js$/.test(entry.name)) {
+        const source = readFileSync(full, 'utf8')
+        source.split('\n').forEach((line, index) => {
+          if (COMMENT_RESIDUE.test(line)) {
+            const short = full.slice(ROOT.length + 1)
+            offenders.push(`${short}:${index + 1}  ${line.trim()}`)
+          }
+        })
+      }
+    }
+  }
+  for (const root of roots) walk(root)
+  eq(offenders, [], `comments that only make sense with the conversation as context:\n       ${offenders.join('\n       ')}`)
 })
 
 // ---------------------------------------------------------------------------

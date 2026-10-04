@@ -178,13 +178,11 @@ export const STYLES = `
    There is deliberately NO rule keyed on the button's own state, for two
    independent reasons:
 
-     - A button that changes appearance when pressed was not wanted, and a state
-       rule is the only thing that could make it do so.
-     - A state rule and :hover have EQUAL specificity (a class plus one
-       qualifier each), so source order decides. A rule for
-       [aria-pressed='true'] sitting after :hover silently wins, and the hover
-       tint disappears — which is exactly what happened while this button
-       carried one.
+     - The control must not change appearance when used, and a state rule is the
+       only thing that could make it do so.
+     - A state rule and :hover have EQUAL specificity (a class plus one qualifier
+       each), so source order decides. A rule for [aria-pressed='true'] placed
+       after :hover therefore wins, and the hover tint becomes unreachable.
 
    The hover tint and the focus ring are the entire affordance: enough to read
    as pressable without impersonating one of the view pills. */
