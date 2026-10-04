@@ -7,6 +7,10 @@
 本文档是实现之前的架构决策记录。文中所有平台事实都标注了可复核的证据位置
 （DSH 发行包内文件 + 行号）。核对基线：`@deepseek-ai/dsh@0.2.0-rc.2`。
 
+> **这是设计记录，不是使用说明。** 想用，看 [README](../README.md)；
+> 想改代码，先看 [AGENTS.md](../AGENTS.md) —— 命令、架构不变量、房子规矩都在那里。
+> 写新的渲染器，看 [02-renderer-authoring.md](02-renderer-authoring.md)。
+
 ---
 
 ## 1. 目标与非目标
@@ -268,8 +272,8 @@ interface RenderHost {
   mount(node: Node): void
   /** 清空视图容器。 */
   clearView(): void
-  /** 供渲染器遵守的尺寸上限。 */
-  limits: { maxSourceBytes: number; maxPreviewHeight: number }
+  /** 供渲染器遵守的尺寸上限。全部来自用户配置，渲染器不得自定阈值。 */
+  limits: { maxSourceBytes: number; maxPreviewHeight: number; maxTableHeight: number }
   /** 渲染器内抛错时调用：外壳降级为原生代码块并提示。 */
   fail(error: unknown): void
   /** 读取当前配置（只读快照）。 */
@@ -283,6 +287,33 @@ interface RendererInstance {
   enter(viewId: string): void | Promise<void>
   /** 离开实例（宿主即将卸载）。释放 iframe、定时器、观察器。 */
   dispose(): void
+  /**
+   * 可选。实现了它，宿主才会在 banner 上放放大控件；不实现则一个控件都不长。
+   * 四个成员各自解决一个具体问题，见下方说明。
+   */
+  expand?: Expandable
+}
+
+/**
+ * 放大契约。宿主只需要三件事 + 一个订阅：画不画按钮、按下去做什么、
+ * 现在是什么状态、以及**状态被别的途径改变时**的通知。
+ */
+interface Expandable {
+  toggle(): void
+  isOn(): boolean
+  /**
+   * 可选。状态被宿主按钮以外的途径改变时通知宿主。
+   * 弹窗型实现**必须**有：showModal() 让整页 inert，控件开着的这段时间里
+   * 按钮按不到第二次，读者用 ESC 或点背景离开 —— 没有这个通知，
+   * 按钮报告的状态会永久停在"已展开"。
+   */
+  subscribe?(listener: () => void): () => void
+  /**
+   * 可选。"放大能看到现在看不到的东西吗"。
+   * **只在放大对某些内容毫无变化时才实现** —— 比如比自身高度上限矮的表格
+   * 根本没被裁，取消封顶一个像素都不会变。不实现 = 永远提供控件。
+   */
+  available?(): boolean
 }
 
 interface ViewDescriptor {
@@ -368,6 +399,59 @@ value = 'preview' | 'code' | 渲染器自定义 viewId
 - **持久化**：`sessionStorage`。会话内记忆，但**不写进磁盘**——
   渲染器升级后旧的 viewId 可能已不存在，启动时读到未知 viewId 一律回落到默认视图。
   读取时用内存镜像缓存，避免每次切换都重新 `JSON.parse`。
+
+### 5.6 配置契约：配置怎么从磁盘走到浏览器
+
+这是整个插件最反直觉的一处，**必须写下来**，因为踩错了没有任何提示。
+
+**问题**：用户改的是 `cordis.patch.yml`，那是 Node 侧的磁盘文件；而渲染发生在浏览器里。
+两者之间唯一现成的通道是 boot 线缆，而**它不带配置**：
+
+```
+宿主产出   graphRow() → { id, url, rev, inject?, immediately?, external? }
+浏览器消费 parseBootManifest() → 逐字段白名单，其余一律丢弃
+浏览器建entry  const options = { name: id }        ← 没有 config 键
+```
+
+所以浏览器里的 `apply(ctx, rowConfig)` 拿到的 `rowConfig` **恒为 `undefined`**。
+这不是本插件的缺陷，是 DSH 目前的形状（社区插件 `dshmarket` 走的是同一条路：
+宿主 `apply(ctx, config)` + `webServer.register` + 客户端 `fetch`）。
+
+**解法**：
+
+```
+cordis.patch.yml ──▶ 宿主半体 apply(ctx, config) ──▶ Config schema 校验
+                                                              │
+                                                 失败：响亮报错（宿主无行为，炸不了 web boot）
+                                                              │
+                                                 通过：GET /dsh-viewer-kit/config
+                                                              │
+                                            浏览器 apply() ──┘  首扫之前 fetch 一次
+```
+
+**两个半体的严格程度故意不同**：
+
+| | 宿主半体 | 客户端半体 |
+|---|---|---|
+| 值不对 | **响亮失败** | 静默回落默认值 |
+| 不认识的键 | **报错** | 忽略 |
+| 理由 | 配置写错本该立刻发现；宿主半体无行为，失败只记日志 | 路由 404、宿主半体没装、两版本不一致 —— 这些情况下**能渲染**比什么都看不到重要 |
+
+**唯一真相来源**：`src/schema.js` 的一张字段表，同时派生出
+
+- 宿主半体导出的 `Config`（Standard Schema v1，**零依赖手写**——宿主半体是原样拷贝、
+  没有打包器，一个 schema 库得在运行时从 profile 解析）
+- 客户端半体的 `DEFAULT_CONFIG` 与宽松回落
+- `cordis.patch.yml` 里那段配置文档
+
+三处由一张表派生，并有测试双向断言它们一致。**任何一处单独写第二份，就是一个会过期的副本。**
+
+**接缝必须整体推迟到配置落地之后**：`createDomSeam` 在**构造时**就挂上 MutationObserver，
+所以推迟的不是一个 `scan()` 调用，是整个接缝。首屏因此就是最终结果，没有"先按默认值出
+再跳一次"。
+
+**`rowConfig` 的快捷路径**：万一将来 DSH 真的开始发配置，客户端会优先用它并跳过这一跳 ——
+`tools/probe-host.mjs` 有一条**故意埋的绊子**守着这件事（见 §13.7）。
 
 ---
 
@@ -548,9 +632,11 @@ content.querySelector('pre').textContent
 |---|---|---|---|
 | v0 | Kit + 接缝 + HTML / SVG 渲染器 | 全部（基线） | ✅ 已实现 |
 | v0.1 | 数据表格渲染器（CSV / JSON 对象数组 / 管道表格） | **仅 L5** | ✅ 已实现 |
-| v0.2 | `html` 渲染器的脚本开关 / 高度设置（接线到设置项） | L5 + 配置 | 计划 |
-| v0.3 | ECharts 渲染器（`echarts` 围栏 + JSON 嗅探） | **仅 L5** | 计划 |
-| v0.4 | 代码高亮增强（扩展 DSH 的 shiki 语言表） | **仅 L5** | 计划 |
+| v0.2 | `html` 渲染器的脚本开关 / 高度设置 | L5 + 配置 | ✅ 已实现（§5.6） |
+| v0.3 | ECharts 渲染器（`echarts` 围栏 + JSON 嗅探） | L5 + 构建条目 | ✅ 已实现（引擎按需加载，见 §13.7） |
+| v0.4 | 高度封顶 + 放大控件（表格内滚 / HTML 弹窗） | L3 + L5 + 配置 | ✅ 已实现 |
+| v0.5 | 配置跨半区桥（`Config` schema + GET 路由） | Host 半体 + L2 | ✅ 已实现（§5.6） |
+| v0.6 | 代码高亮增强（扩展 DSH 的 shiki 语言表） | **仅 L5** | 计划 |
 | v1 | `viewer_render` 工具来源（§7.2） | L2 + Host 半体 + 一个 toolview | 计划 |
 | v1+ | 设置页（`settings.general.item`）+ 每会话开关 | 独立小模块 | 计划 |
 
@@ -558,6 +644,11 @@ content.querySelector('pre').textContent
 v0.1 已经是这个说法的实证：新增数据表格渲染器时，
 `kit.js` / `dom-seam.js` / `code-block-surface.js` / `contract.js` 一行都没有改动，
 也没有新增任何 DOM 选择器或测试夹具。
+
+> **但 v0.4 与 v0.5 各碰到了一次真边界**，值得记下来：
+> 放大控件需要"一个不属于任何视图的动作"，这在 §5.2 的契约里原本没有位置 —— 视图列表是
+> 互斥的，而放大不是视图。配置桥则碰到了 §5.6 那个空白。两处都是**先扩契约，再写实现**，
+> 而不是绕过契约。
 
 ---
 
@@ -626,12 +717,11 @@ v0.1 已经是这个说法的实证：新增数据表格渲染器时，
 >
 > 正确做法是让插件管理器成为唯一的写入者：包通过 `dsh plugin add` 进入
 > `dependencies` 和 `profile.bundles`，Loader 那一行变成可再生的派生物。
-> 之后同样的安装操作不会再影响它。
 >
-> 这条已经写进 [README](../README.md#快速开始) 的显著位置。
+> 安装步骤见 [README](../README.md) §2；`AGENTS.md` §3 记的是改动时的拷贝覆盖循环
+> （那条路不重装，因此也不碰这个生成物）。
 
-**尚未在真实浏览器里验证的**：切换按钮的实际观感与交互。
-这需要刷新一次页面让客户端模块系统去取新的 bundle，属于一步人工操作。
+
 
 ### 13.5 排查"装了但没渲染"：三个静默失败，与一次自我纠正
 
@@ -723,12 +813,39 @@ DSH 把这个失败当成致命启动错误；而"patch 被重置"正是 **DSH �
    任何违反都会变成测试失败，而不是线上崩溃。
 3. `tests/repro-activation.mjs`（`pnpm run repro`）用同一套 harness 跑**构建产物**，
    失败时打印栈 —— 因为崩溃日志里只有 `<name>: failed`，真正的栈只进浏览器控制台。
-4. `pnpm run check` = typecheck + build + 46 项测试 + repro，全部必须绿。
+4. `pnpm run check` = typecheck + build + 126 项测试 + repro + 宿主契约探针，全部必须绿。
 
 > **教训**：写插件的"接口"部分时，**先读契约，再写代码**。
-> 我三次都是先写、再假设运行时"应该"怎样，代价是让用户的 DSH 崩了两次。
-> 一个宽松的 stub 是比没有测试更坏的东西——它给出虚假的安全感。
+> 宽松的 stub 是比没有测试更坏的东西 —— 它给出虚假的安全感。
 
-**尚未在真实浏览器里验证的**：修复后的实际渲染效果。
-三个 bug 都由严格 harness 复现并验证修复，但 harness 仍然是我对运行时的建模，
-不是你机器上那个运行时。所以重新启用前应先征得用户同意。
+---
+
+### 13.7 宿主契约探针：把"没文档的假设"变成会红的检查
+
+本插件有三处依赖 DSH **没有公开文档**的事实：
+
+- 客户端模块系统接受的 on-demand chunk 文件名规则（`/^client\.[A-Za-z0-9][A-Za-z0-9._-]*\.js$/`）
+- 工厂用什么请求 chunk（`require.async`）
+- 缺失 bundle 时的具名错误（`MissingClientBundleError`）
+
+它们一旦被 DSH 升级改掉，**失败方式不是报错，而是图表静默不画**。只写在注释里等于没有。
+
+`tools/probe-host.mjs` 直接读安装目录里的 `app.asar`，把
+`@deepseek-ai/dsh-client-modules` 的**真实产物**当事实来源，核 8 条契约。
+它不需要 Electron 就能跑：一个 asar 就是「16 字节头 + JSON 目录树 + 内容」，
+写个几十行的读取器足够。头部的坑记在 `tools/README.md`：`DATA_BASE = 8 + headerSize`，
+**不是** `16 + headerSize` —— 差 8 字节会让每个文件都读到前一个文件的尾巴，
+小文件直接被截断，而大文件看起来完全正常。
+
+**探针自己必须有负向测试**（`tests/probe-host.mjs`）：每条检查都有一个"改坏的宿主"能让它变红，
+外加一条"忠实宿主必须全绿" —— 没有后者，一个永远失败的探针也能满足全部负向测试。
+探针找不到 DSH 时 **SKIP 而非通过**，输出里也不会出现 `assumptions confirmed` 字样。
+
+其中一条是**故意埋的绊子**：
+
+```
+the boot wire still carries no config, so P0 is still open
+```
+
+它核的是 §5.6 那件事 —— 线缆不带配置。**DSH 哪天加了，这条会红，那天应该删掉整条 HTTP 桥，
+直接读行配置。** 一个只在"该重构时"才会响的检查，比注释里的 TODO 可靠，因为它挡在 CI 上。

@@ -2248,6 +2248,64 @@ await test('source comments do not reference the conversation that produced them
 })
 
 // ---------------------------------------------------------------------------
+// documentation cross-references
+//
+// A design document that points at a file, a heading or a section which has
+// moved is worse than one that points nowhere: it looks authoritative and
+// sends the reader somewhere empty. Every link is resolved here rather than
+// trusted, because these documents cross-link to each other and to both
+// top-level files, and renames happen.
+// ---------------------------------------------------------------------------
+
+process.stdout.write('\ndocs (cross-references must resolve)\n')
+
+await test('every link between the documents resolves', () => {
+  /** @type {string[]} */
+  const broken = []
+  const docs = ['README.md', 'AGENTS.md', 'docs/01-architecture.md', 'docs/02-renderer-authoring.md']
+  for (const name of docs) {
+    const text = readFileSync(join(ROOT, name), 'utf8')
+    const dir = dirname(join(ROOT, name))
+    // `](../path)` and `](path)` — a fragment is checked separately below.
+    for (const match of text.matchAll(/\]\(([^)\s]+?)(#[^)\s]*)?\)/g)) {
+      const target = match[1]
+      if (/^[a-z]+:/i.test(target)) continue // an external URL
+      const resolved = resolve(dir, target)
+      if (!existsSync(resolved)) broken.push(`${name} → ${target}`)
+    }
+  }
+  eq(broken, [], `links that point at a file which does not exist:\n       ${broken.join('\n       ')}`)
+})
+
+await test('every section a document refers to still exists', () => {
+  // A `§5.6` that no longer resolves is the same rot as a broken file link, and
+  // harder to notice: the number still looks plausible.
+  //
+  // Resolved against the union of all four documents' headings, because these
+  // files cross-reference each other freely (a checklist in 02 pointing at
+  // AGENTS.md §4.1, a README pointing at architecture §5.6). That is
+  // deliberately permissive: it will not catch a reference that resolves to a
+  // same-numbered section in the *wrong* document, and it is a fair trade for
+  // not having to model which document each reference means. The failure this
+  // exists to catch is a number that resolves nowhere.
+  const headings = new Set()
+  for (const name of ['README.md', 'AGENTS.md', 'docs/01-architecture.md', 'docs/02-renderer-authoring.md']) {
+    for (const match of readFileSync(join(ROOT, name), 'utf8').matchAll(/^#{2,3} (\d+(?:\.\d+)*)\.?\s/gm)) {
+      headings.add(match[1])
+    }
+  }
+  /** @type {string[]} */
+  const broken = []
+  for (const name of ['README.md', 'AGENTS.md', 'docs/01-architecture.md', 'docs/02-renderer-authoring.md']) {
+    const text = readFileSync(join(ROOT, name), 'utf8')
+    for (const match of text.matchAll(/§(\d+(?:\.\d+)*)/g)) {
+      if (!headings.has(match[1])) broken.push(`${name} → §${match[1]}`)
+    }
+  }
+  eq(broken, [], `section references that no longer exist:\n       ${broken.join('\n       ')}`)
+})
+
+// ---------------------------------------------------------------------------
 
 process.stdout.write(`\n${passed} passed, ${failures.length} failed\n`)
 if (failures.length > 0) {

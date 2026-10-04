@@ -36,7 +36,7 @@
 pnpm install
 pnpm run build       # tsdown 打客户端 + 拷贝宿主半体到 lib/
 pnpm run typecheck   # tsc --noEmit（含 checkJs）
-pnpm test            # 126 项测试
+pnpm test            # 128 项测试
 pnpm run repro       # 单独跑一次激活复现，带栈
 pnpm run check       # typecheck → build → test → repro → probe:test → probe
 pnpm run preflight   # 打包 → 解包 → 校验 → 清理
@@ -213,7 +213,7 @@ src/client/
   chunk-loader.js            按需加载引擎 chunk（走 DSH 原生 chunk 机制）
   chunks/echarts.js          引擎本体，独立成文件，不进入口 bundle
   renderers/                 L5 渲染器：echarts / html / table
-tests/                       126 项测试 + 探针负向测试 + DOM 垫片 + 从 DSH 产物抄来的夹具
+tests/                       128 项测试 + 探针负向测试 + DOM 垫片 + 从 DSH 产物抄来的夹具
 tools/probe-host.mjs         ★ 宿主契约探针（读 app.asar）
 tools/preflight.mjs          打包后自检
 docs/01-architecture.md      架构与取舍的完整记录（§ 引用它，别在注释里重述）
@@ -260,6 +260,6 @@ pnpm run check      # 再看类型、夹具与断言
   反引号会**直接终止字符串**。`tsc` 会报一串莫名其妙的语法错，让人以为是别的地方坏了。
 - **不要**给 `:hover` 和状态选择器写同权重的规则并让状态规则排在后面，那会静默吃掉 hover。
   见 §4.1 的例子。
-- **不要**在客户端半体里读 `ctx.get(name)` 以外的东西（§5.5）。
-- **不要**把 `client/` 加进 `.gitignore`（§5.7）。
+- **不要**在客户端半体里读 `ctx.get(name)` 以外的成员（§5 的第 5 条）。
+- **不要**把 `client/` 加进 `.gitignore`（§5 的第 7 条）。
 - **不要**为了让测试通过而放宽断言。断言变红通常意味着代码错了，先查代码。

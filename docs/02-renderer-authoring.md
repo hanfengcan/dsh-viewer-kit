@@ -7,6 +7,9 @@
 > 这不是承诺，是已经发生过的事：`renderers/table.js` 是在 `html.js` 之后
 > 单独加进去的，当时内核与接缝一行都没改，也没有多写一个 DOM 夹具。
 
+> 改代码前先看 [AGENTS.md](../AGENTS.md) —— 房子规矩（尤其是 §4.1 注释怎么写）
+> 在那里。架构取舍见 [01-architecture.md](01-architecture.md)。
+
 > **但有一个前提，先说清楚：以上只对"自包含"渲染器成立。**
 > `renderers/echarts.js` 是第二个真实交付物，它需要**四处**改动（引擎 chunk、
 > 构建配置、可能还有 L1 的识别判据）。两档的完整对照见
@@ -31,6 +34,8 @@ src/client/index.js 的 RENDERER_FACTORIES ← 加一行
 ```
 
 没了。没有新的 slot、没有新的 DOM 选择器、没有新的测试夹具。
+
+（可选：实例上返回一个 `expand` 就能拿到放大控件，见 §8.5；它**不**要求改动上面任何一个文件。）
 
 `src/client/renderers/table.js` 就是这么来的——它是在 `html.js` 之后单独加进去的，
 当时 `kit.js` / `dom-seam.js` / `code-block-surface.js` / `contract.js` **一行都没动**。
@@ -159,7 +164,7 @@ match(request) {
   document,                     // 建节点用
   mount(node),                  // 挂到 surface 自己的容器里
   clearView(),                  // 清空该容器（切换视图时宿主已经替你调过）
-  limits: { maxSourceBytes, maxPreviewHeight },
+  limits: { maxSourceBytes, maxPreviewHeight, maxTableHeight },
   fail(error),                  // 上报致命错误：外壳降级为原生代码块
   config(),                     // 只读配置快照
 }
@@ -283,6 +288,49 @@ match(request) {
 - 宿主没有 locale 服务时，`locale.js` 会按 `document.documentElement.lang`
   回退到内置字典，所以不接 locale 也不会显示原始 key。
 
+> 字典两个语言必须**键集合相同**，测试会断言。加了新键只加一边，
+> 那个语言就会静默回落英文 —— 而且**不报错**。`tests/run.mjs` 里有一条直接比对两边的用例。
+
+---
+
+## 8.5 放大控件（可选契约）
+
+实例上多返回一个 `expand`，宿主就会在 banner 上放一个放大图标。
+**不返回就没有控件** —— 一个不实现任何东西的渲染器不该长一个按了没反应的按钮。
+
+```js
+return {
+  views: [...],
+  enter(viewId) {},
+  dispose() {},
+
+  expand: {
+    toggle() { /* 开 / 关 */ },
+    isOn: () => /* 现在开着吗 */ },
+  },
+}
+```
+
+**四个成员各自对应一个具体问题：**
+
+| 成员 | 什么时候需要 |
+|---|---|
+| `toggle` / `isOn` | 总是 |
+| `subscribe` | **弹窗型必须有**。`showModal()` 让整页 inert，控件开着时按钮**按不到第二次**，读者用 ESC 或点背景离开。没有通知，按钮报告的状态会永久停在"已展开"。 |
+| `available` | **只在放大对某些内容毫无变化时才实现**。比自身高度上限矮的表格根本没被裁，取消封顶一个像素都不变 —— 那种情况不该给按钮。不实现 = 永远提供。 |
+
+**`available()` 只能问"有没有东西被藏起来"，不能问"值不值得"。** 判据用
+`scrollHeight > clientHeight`（真正的溢出测试），不要用行数或字符数：同样行数换个字号
+高度就不同，单元格还会折行。`0/0` 视为"没有布局信息"，给按钮 —— 猜错方向只是多一个
+不太有用的按钮，猜"不"会藏掉唯一的出路。
+
+**弹窗要挂在 `document.body` 上，不要挂进块里。** 两条都是硬要求：`viewRoot` 每次切视图
+都会被清空，而会话是**虚拟化**的，块可能在弹窗还开着时就被回收。
+
+**样式上有一条容易踩的**：控件的**状态规则和 `:hover` 权重相同**，比的是书写顺序 ——
+状态规则写在 `:hover` 后面就会**静默吃掉** hover。所以这个控件**不要有任何状态样式**；
+真需要，用一个不会与 `:hover` 同权重的选择器。
+
 ---
 
 ## 9. 自测
@@ -304,7 +352,7 @@ parseHtml(conversationFixture([
 `tests/run.mjs` 里的 `mount()` 辅助函数已经封装好了这套流程，
 新增渲染器时照抄 "second renderer" 那一节即可。
 
-跑构建与测试（见 [README 快速开始](../README.md#快速开始)）：
+跑构建与测试（命令与 [AGENTS.md](../AGENTS.md) §2 相同）：
 
 ```powershell
 fnm use          # 仓库用 .node-version 声明 Node 24；tsdown 需要 ≥ 22
@@ -359,8 +407,10 @@ define: { 'process.env.NODE_ENV': JSON.stringify('production') }
 - [ ] `dispose()` 释放了所有副作用（定时器、`ResizeObserver`、子组件、事件监听）
 - [ ] 没有 `innerHTML` / `insertAdjacentHTML` 用来放模型的原始文本
 - [ ] 需要沙箱的地方，`sandbox` 和 `allow-same-origin` 没有同时出现
-- [ ] `t('view.<id>', …)` 在中英字典里都补了
-- [ ] `pnpm run check` 全绿（类型检查 + 构建 + 测试）
+- [ ] `t('view.<id>', …)` 在中英字典里都补了（**键集合必须相同**，测试会断言）
+- [ ] 注释写的是不变式与失败模式，不是"这个 bug 是谁报的 / 哪次对话里发现的"
+      （判据与正反例见 [AGENTS.md](../AGENTS.md) §4.1；有测试扫描）
+- [ ] `pnpm run check` 全绿（类型检查 + 构建 + 测试 + 宿主契约探针）
 
 **带引擎渲染器，额外：**
 
