@@ -11,8 +11,17 @@
 
 const NAMESPACE = 'dsh-viewer-kit'
 
-/** @type {Record<string, Record<string, string>>} */
-const DICTIONARIES = {
+/**
+ * Copy for the kit, keyed by language.
+ *
+ * Exported so a test can ask it directly. A missing key does not fail loudly at
+ * runtime — `t` falls back to the English literal — so "the button says
+ * 'Enlarge' inside a Chinese interface" is only catchable by comparing the two
+ * dictionaries, which is what that test does.
+ *
+ * @type {Record<string, Record<string, string>>}
+ */
+export const DICTIONARIES = {
   en: {
     'switch.label': 'Content view',
     'view.code': 'Code',
@@ -20,6 +29,9 @@ const DICTIONARIES = {
     'view.table': 'Table',
     'view.chart': 'Chart',
     'html.frameTitle': 'HTML preview',
+    'expand.label': 'Enlarge',
+    'html.modalTitle': 'HTML preview',
+    'html.modalClose': 'Close',
     'table.summary': '{rows} rows × {columns} columns',
     'table.truncated': 'Showing the first {rows} rows and {columns} columns',
     'chart.loading': 'Loading the chart engine…',
@@ -34,6 +46,9 @@ const DICTIONARIES = {
     'view.table': '表格',
     'view.chart': '图表',
     'html.frameTitle': 'HTML 预览',
+    'expand.label': '放大',
+    'html.modalTitle': 'HTML 预览',
+    'html.modalClose': '关闭',
     'table.summary': '{rows} 行 × {columns} 列',
     'table.truncated': '仅显示前 {rows} 行、前 {columns} 列',
     'chart.loading': '正在加载图表引擎…',

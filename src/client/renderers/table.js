@@ -279,6 +279,30 @@ export function createTableRenderer(t) {
       let expanded = false
 
       /**
+       * Told when the cap is lifted or dropped.
+       *
+       * A table is only ever toggled by its own button, so nothing else drives
+       * this today — but the surface renders `aria-pressed` from `isOn()` and
+       * the HTML preview already needed this because a modal dialog closes
+       * itself. Publishing the same hook keeps the two renderers interchangeable
+       * and means a future way out of this control does not silently strand the
+       * button again.
+       *
+       * @type {Set<() => void>}
+       */
+      const expandListeners = new Set()
+
+      const notifyExpand = () => {
+        for (const listener of [...expandListeners]) {
+          try {
+            listener()
+          } catch {
+            /* a listener that throws must not strand the table */
+          }
+        }
+      }
+
+      /**
        * This instance's own wrap, so `expand` restyles the right one.
        *
        * A `document.querySelector` here would find whichever table came first
@@ -309,8 +333,13 @@ export function createTableRenderer(t) {
             // the code view is showing has nothing to restyle; the next
             // `enter` reads the new state.
             applyCap()
+            notifyExpand()
           },
           isOn: () => expanded,
+          subscribe: (listener) => {
+            expandListeners.add(listener)
+            return () => expandListeners.delete(listener)
+          },
         },
 
         enter(viewId) {
@@ -374,6 +403,7 @@ export function createTableRenderer(t) {
 
         dispose() {
           wrap = null
+          expandListeners.clear()
         },
       }
     },

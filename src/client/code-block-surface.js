@@ -150,9 +150,10 @@ export function createCodeBlockSurface(options) {
 
   // --- the expand button ----------------------------------------------------
   //
-  // A sibling of the switcher, not a third child of it. The switcher's children
-  // are the view buttons and existing assertions index them by position; an
-  // action that is not a view would silently change what `children[1]` is.
+  // A sibling of the switcher with its OWN class, not a third child borrowing
+  // `.dvk-switch__item`. That class is designed to sit inside the switch's
+  // container and reads as "one of the views"; reusing it made the action look
+  // like a selected view rather than a button.
   //
   // It appears and disappears with `enter`, because whether enlarging makes
   // sense depends on what is on screen: lifting a table's height cap is
@@ -160,6 +161,8 @@ export function createCodeBlockSurface(options) {
   // nothing is worse than not offering one.
   /** @type {HTMLElement | null} */
   let expandControl = null
+  /** @type {(() => void) | null} */
+  let unsubscribeExpand = null
 
   const syncExpandControl = (activeViewId) => {
     // The built-in code view mounts nothing, so there is nothing to enlarge.
@@ -172,7 +175,7 @@ export function createCodeBlockSurface(options) {
     if (expandControl === null) {
       const button = /** @type {HTMLButtonElement} */ (doc.createElement('button'))
       button.type = 'button'
-      button.className = 'dvk-switch__item dvk-expand'
+      button.className = 'dvk-expand'
       button.setAttribute('data-dvk-action', 'expand')
       button.setAttribute('aria-pressed', 'false')
       button.addEventListener('click', () => {
@@ -185,6 +188,14 @@ export function createCodeBlockSurface(options) {
       })
       switchHost.appendChild(button)
       expandControl = button
+    }
+    // Subscribed once rather than per `enter`, because a modal dialog closes
+    // itself — and while it is open it makes the page **inert**, so this button
+    // cannot be pressed again to correct its own state. Without the
+    // subscription the pressed styling sticks on forever after ESC or a
+    // backdrop click, describing a dialog that is already gone.
+    if (unsubscribeExpand === null && typeof expandable.subscribe === 'function') {
+      unsubscribeExpand = expandable.subscribe(() => syncExpandControl(current))
     }
     expandControl.setAttribute('aria-pressed', String(instance?.expand?.isOn?.() === true))
     expandControl.textContent = t('expand.label', 'Enlarge')
@@ -267,6 +278,7 @@ export function createCodeBlockSurface(options) {
       // The expand button is a sibling of the switcher in the banner, not a
       // child of the switcher, so removing the switcher does not take it.
       expandControl?.remove()
+      unsubscribeExpand?.()
       content.removeAttribute(MODE_ATTRIBUTE)
     },
   }

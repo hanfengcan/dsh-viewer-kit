@@ -161,16 +161,24 @@ const SWITCH_ATTRIBUTE = "data-dvk-switch";
 */
 /**
 * The enlarge affordance, kept as its own shape because the host only ever needs
-* three things from it: whether to draw a button, what pressing it does, and
-* whether it is currently pressed.
+* four things from it: whether to draw a button, what pressing it does, whether
+* it is currently pressed, and when that answer changed without the host asking.
 *
 * `isOn` exists so a toggle can report state. A table lifting its own cap and an
 * HTML preview opening a dialog are different actions, but both answer the same
 * question to the button that drives them.
 *
+* `subscribe` exists because a button click is not the only way the state
+* changes. A modal dialog makes the page inert, so once the HTML preview is
+* enlarged **the button cannot be clicked again** — the reader leaves with ESC
+* or the close control, and without a notification the button's pressed styling
+* would stay stuck on forever, describing a dialog that is no longer open.
+*
 * @typedef {object} Expandable
 * @property {() => void} toggle
 * @property {() => boolean} isOn
+* @property {(listener: () => void) => (() => void)} [subscribe] Called after
+*   the state changes by any route other than the host's own button.
 */
 /**
 * The contract every renderer implements. Adding a renderer means adding a
@@ -438,6 +446,8 @@ function createCodeBlockSurface(options) {
 	content.appendChild(viewRoot);
 	/** @type {HTMLElement | null} */
 	let expandControl = null;
+	/** @type {(() => void) | null} */
+	let unsubscribeExpand = null;
 	const syncExpandControl = (activeViewId) => {
 		const expandable = activeViewId === "code" ? void 0 : instance?.expand;
 		if (expandable === void 0 || typeof expandable.toggle !== "function") {
@@ -448,7 +458,7 @@ function createCodeBlockSurface(options) {
 		if (expandControl === null) {
 			const button = doc.createElement("button");
 			button.type = "button";
-			button.className = "dvk-switch__item dvk-expand";
+			button.className = "dvk-expand";
 			button.setAttribute("data-dvk-action", "expand");
 			button.setAttribute("aria-pressed", "false");
 			button.addEventListener("click", () => {
@@ -462,6 +472,7 @@ function createCodeBlockSurface(options) {
 			switchHost.appendChild(button);
 			expandControl = button;
 		}
+		if (unsubscribeExpand === null && typeof expandable.subscribe === "function") unsubscribeExpand = expandable.subscribe(() => syncExpandControl(current));
 		expandControl.setAttribute("aria-pressed", String(instance?.expand?.isOn?.() === true));
 		expandControl.textContent = t("expand.label", "Enlarge");
 	};
@@ -522,6 +533,7 @@ function createCodeBlockSurface(options) {
 			viewRoot.remove();
 			switcher.remove();
 			expandControl?.remove();
+			unsubscribeExpand?.();
 			content.removeAttribute(MODE_ATTRIBUTE);
 		}
 	};
@@ -1776,6 +1788,23 @@ function createHtmlRenderer(t) {
 			/** @type {(() => void) | null} */
 			let releaseDialogListener = null;
 			/**
+			* Told when the enlarged view opens or closes by a route other than the
+			* surface's own button.
+			*
+			* A modal dialog makes the page inert, so while it is open the enlarge
+			* button **cannot be pressed again** — the reader leaves with ESC or the
+			* close control. Without this the button's pressed styling would stay on
+			* forever, describing a dialog that is no longer there.
+			*
+			* @type {Set<() => void>}
+			*/
+			const expandListeners = /* @__PURE__ */ new Set();
+			const notifyExpand = () => {
+				for (const listener of [...expandListeners]) try {
+					listener();
+				} catch {}
+			};
+			/**
 			* The cap an enlarged frame is measured against.
 			*
 			* Derived from the viewport rather than from `maxPreviewHeight`, because
@@ -1804,6 +1833,7 @@ function createHtmlRenderer(t) {
 				try {
 					open.remove();
 				} catch {}
+				notifyExpand();
 			};
 			const openDialog = () => {
 				if (dialog !== null) return;
@@ -1847,7 +1877,9 @@ function createHtmlRenderer(t) {
 				};
 				view.addEventListener?.("message", onModalMessage);
 				releaseDialogListener = () => view.removeEventListener?.("message", onModalMessage);
+				dialog.addEventListener("close", closeDialog);
 				if (typeof dialog.showModal === "function") dialog.showModal();
+				notifyExpand();
 			};
 			return {
 				views: [{
@@ -1859,7 +1891,11 @@ function createHtmlRenderer(t) {
 						if (dialog === null) openDialog();
 						else closeDialog();
 					},
-					isOn: () => dialog !== null
+					isOn: () => dialog !== null,
+					subscribe: (listener) => {
+						expandListeners.add(listener);
+						return () => expandListeners.delete(listener);
+					}
 				},
 				enter(viewId) {
 					if (viewId === "code") {
@@ -1870,6 +1906,7 @@ function createHtmlRenderer(t) {
 				},
 				dispose() {
 					closeDialog();
+					expandListeners.clear();
 					destroyFrame();
 				}
 			};
@@ -2471,6 +2508,24 @@ function createTableRenderer(t) {
 			*/
 			let expanded = false;
 			/**
+			* Told when the cap is lifted or dropped.
+			*
+			* A table is only ever toggled by its own button, so nothing else drives
+			* this today — but the surface renders `aria-pressed` from `isOn()` and
+			* the HTML preview already needed this because a modal dialog closes
+			* itself. Publishing the same hook keeps the two renderers interchangeable
+			* and means a future way out of this control does not silently strand the
+			* button again.
+			*
+			* @type {Set<() => void>}
+			*/
+			const expandListeners = /* @__PURE__ */ new Set();
+			const notifyExpand = () => {
+				for (const listener of [...expandListeners]) try {
+					listener();
+				} catch {}
+			};
+			/**
 			* This instance's own wrap, so `expand` restyles the right one.
 			*
 			* A `document.querySelector` here would find whichever table came first
@@ -2494,8 +2549,13 @@ function createTableRenderer(t) {
 					toggle() {
 						expanded = !expanded;
 						applyCap();
+						notifyExpand();
 					},
-					isOn: () => expanded
+					isOn: () => expanded,
+					subscribe: (listener) => {
+						expandListeners.add(listener);
+						return () => expandListeners.delete(listener);
+					}
 				},
 				enter(viewId) {
 					if (viewId === "code") {
@@ -2544,6 +2604,7 @@ function createTableRenderer(t) {
 				},
 				dispose() {
 					wrap = null;
+					expandListeners.clear();
 				}
 			};
 		}
@@ -2563,7 +2624,16 @@ function createTableRenderer(t) {
 * @module locale
 */
 const NAMESPACE$1 = "dsh-viewer-kit";
-/** @type {Record<string, Record<string, string>>} */
+/**
+* Copy for the kit, keyed by language.
+*
+* Exported so a test can ask it directly. A missing key does not fail loudly at
+* runtime — `t` falls back to the English literal — so "the button says
+* 'Enlarge' inside a Chinese interface" is only catchable by comparing the two
+* dictionaries, which is what that test does.
+*
+* @type {Record<string, Record<string, string>>}
+*/
 const DICTIONARIES = {
 	en: {
 		"switch.label": "Content view",
@@ -2572,6 +2642,9 @@ const DICTIONARIES = {
 		"view.table": "Table",
 		"view.chart": "Chart",
 		"html.frameTitle": "HTML preview",
+		"expand.label": "Enlarge",
+		"html.modalTitle": "HTML preview",
+		"html.modalClose": "Close",
 		"table.summary": "{rows} rows × {columns} columns",
 		"table.truncated": "Showing the first {rows} rows and {columns} columns",
 		"chart.loading": "Loading the chart engine…",
@@ -2586,6 +2659,9 @@ const DICTIONARIES = {
 		"view.table": "表格",
 		"view.chart": "图表",
 		"html.frameTitle": "HTML 预览",
+		"expand.label": "放大",
+		"html.modalTitle": "HTML 预览",
+		"html.modalClose": "关闭",
 		"table.summary": "{rows} 行 × {columns} 列",
 		"table.truncated": "仅显示前 {rows} 行、前 {columns} 列",
 		"chart.loading": "正在加载图表引擎…",
@@ -2821,6 +2897,42 @@ const STYLES = `
   padding: 12px 2px;
   color: var(--dsw-alias-label-tertiary, #888);
   font: 11px/18px var(--dsw-font-family, system-ui, sans-serif);
+}
+
+/* The enlarge control.
+
+   Deliberately NOT the switch's item class. That class is designed to sit
+   INSIDE a '.dvk-switch' container and reads as "one of the views"; reusing it
+   for a sibling action made the button inherit a pressed-pill look and be
+   mistaken for a selected view. This is a plain control: a thin border so it
+   reads as something pressable, and a hover tint as the affordance. */
+.dvk-expand {
+  appearance: none;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.28));
+  margin: 0 0 0 4px;
+  padding: 0 8px;
+  height: 24px;
+  border-radius: var(--dsw-radius-sm, 6px);
+  font: 11px/18px var(--dsw-font-family, system-ui, sans-serif);
+  color: var(--dsw-alias-label-secondary, #666);
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.dvk-expand:hover {
+  color: var(--dsw-alias-label-primary, #111);
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.12));
+}
+.dvk-expand:focus-visible {
+  outline: 1px solid var(--dsw-alias-state-business-primary, #4a7dff);
+  outline-offset: 1px;
+}
+/* Pressed is a tint, not the white pill the view switch uses — it must not
+   read as "this view is selected". */
+.dvk-expand[aria-pressed='true'] {
+  color: var(--dsw-alias-label-primary, #111);
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.16));
+  border-color: var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.4));
 }
 
 /* Enlarged preview.

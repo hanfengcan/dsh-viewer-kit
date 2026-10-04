@@ -445,6 +445,11 @@ function attachDialog(element, doc) {
     if (element.open !== true) return
     element.open = false
     doc.openDialogs = Math.max(0, (doc.openDialogs ?? 1) - 1)
+    // A real <dialog> fires `close` when it closes itself, and that event is
+    // exactly how ESC and a backdrop click reach a listener. A shim that only
+    // flipped the flag would leave the plugin's cleanup path untested while the
+    // suite still looked like it covered the case.
+    element.dispatch('close')
   }
 }
 

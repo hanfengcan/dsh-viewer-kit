@@ -73,16 +73,24 @@
 
 /**
  * The enlarge affordance, kept as its own shape because the host only ever needs
- * three things from it: whether to draw a button, what pressing it does, and
- * whether it is currently pressed.
+ * four things from it: whether to draw a button, what pressing it does, whether
+ * it is currently pressed, and when that answer changed without the host asking.
  *
  * `isOn` exists so a toggle can report state. A table lifting its own cap and an
  * HTML preview opening a dialog are different actions, but both answer the same
  * question to the button that drives them.
  *
+ * `subscribe` exists because a button click is not the only way the state
+ * changes. A modal dialog makes the page inert, so once the HTML preview is
+ * enlarged **the button cannot be clicked again** — the reader leaves with ESC
+ * or the close control, and without a notification the button's pressed styling
+ * would stay stuck on forever, describing a dialog that is no longer open.
+ *
  * @typedef {object} Expandable
  * @property {() => void} toggle
  * @property {() => boolean} isOn
+ * @property {(listener: () => void) => (() => void)} [subscribe] Called after
+ *   the state changes by any route other than the host's own button.
  */
 
 /**

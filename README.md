@@ -288,7 +288,7 @@ __DSH_VIEWER_KIT__.diagnose()
 
 ```powershell
 pnpm install
-pnpm run check        # 类型检查 → 构建 → 120 项测试 → 产物激活复现 → 宿主契约探针
+pnpm run check        # 类型检查 → 构建 → 122 项测试 → 产物激活复现 → 宿主契约探针
 pnpm run release      # check + 打包自检，完整发布门禁
 ```
 
@@ -413,7 +413,7 @@ src/client/
   renderers/           L5 渲染器：echarts / html / table
 src/index.js           Host 半体（仅作为 Loader 行的锚点）
 client/                ★ 构建产物，提交进库（见下）
-tests/                 120 项测试 + 探针负向测试 + DOM 垫片 + 从 DSH 真实产物抄来的夹具
+tests/                 122 项测试 + 探针负向测试 + DOM 垫片 + 从 DSH 真实产物抄来的夹具
 tools/                 宿主契约探针（读 app.asar）+ 发布前自检
 docs/                  架构设计 / 渲染器作者指南
 tsdown.config.ts       ★ 客户端 bundle 的构建契约（模块格式与 chunk 规则在这里定义）
@@ -424,7 +424,7 @@ tsdown.config.ts       ★ 客户端 bundle 的构建契约（模块格式与 ch
 > **构建产物是提交进版本库的**，这与"不提交产物"的常规做法相反，是有意的：本仓库就是被
 > `pnpm add file:<path>` 安装的那一份，而 DSH 激活时会直接 `readFileSync` 这个 bundle，
 > 缺文件会抛 `MissingClientBundleError` 并让 entry 激活失败。提交它们，新克隆的树才开箱可装
-> —— **这一条实测过：`git clone` 后不装任何依赖，120 项测试全绿。**
+> —— **这一条实测过：`git clone` 后不装任何依赖，122 项测试全绿。**
 > 改完源码务必重新 `pnpm run build` 再提交。
 
 > **tarball 只装必需的东西。** `package.json` 的 `files` 只有 `lib/ client/

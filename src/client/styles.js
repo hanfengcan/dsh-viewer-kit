@@ -166,6 +166,42 @@ export const STYLES = `
   font: 11px/18px var(--dsw-font-family, system-ui, sans-serif);
 }
 
+/* The enlarge control.
+
+   Deliberately NOT the switch's item class. That class is designed to sit
+   INSIDE a '.dvk-switch' container and reads as "one of the views"; reusing it
+   for a sibling action made the button inherit a pressed-pill look and be
+   mistaken for a selected view. This is a plain control: a thin border so it
+   reads as something pressable, and a hover tint as the affordance. */
+.dvk-expand {
+  appearance: none;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.28));
+  margin: 0 0 0 4px;
+  padding: 0 8px;
+  height: 24px;
+  border-radius: var(--dsw-radius-sm, 6px);
+  font: 11px/18px var(--dsw-font-family, system-ui, sans-serif);
+  color: var(--dsw-alias-label-secondary, #666);
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.dvk-expand:hover {
+  color: var(--dsw-alias-label-primary, #111);
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.12));
+}
+.dvk-expand:focus-visible {
+  outline: 1px solid var(--dsw-alias-state-business-primary, #4a7dff);
+  outline-offset: 1px;
+}
+/* Pressed is a tint, not the white pill the view switch uses — it must not
+   read as "this view is selected". */
+.dvk-expand[aria-pressed='true'] {
+  color: var(--dsw-alias-label-primary, #111);
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.16));
+  border-color: var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.4));
+}
+
 /* Enlarged preview.
 
    A <dialog> shown with showModal() is in the browser's top layer, which is

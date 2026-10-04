@@ -904,7 +904,8 @@ await test('closing the enlarged dialog leaves the conversation exactly as it wa
 await test('the enlarge control is a sibling of the view switch, not one of its views', () => {
   // The switcher's children are the views and existing assertions index them by
   // position. An action masquerading as a third view would change what
-  // `children[2]` means to all of them.
+  // `children[2]` means to all of them — and, borrowing the switch item class,
+  // would also make it LOOK like a selected view rather than a button.
   const table = createTableRenderer((_key, fallback) => fallback)
   const { env } = mount(conversationFixture([
     { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'csv', code: tallCsv(400) }) },
@@ -912,7 +913,50 @@ await test('the enlarge control is a sibling of the view switch, not one of its 
   const sw = switcher(env.document)
   eq(sw.children.map((b) => b.getAttribute('data-dvk-view')), ['table', 'code'], 'the switch still holds exactly the views')
   eq(sw.querySelector('[data-dvk-action="expand"]'), null, 'the control is not inside the switch')
-  assert(expandButton(env.document) !== null, 'it is next to it in the banner')
+  const button = expandButton(env.document)
+  assert(button !== null, 'it is next to it in the banner')
+  eq(button.className, 'dvk-expand', 'and it carries its own class, not the switch item class')
+})
+
+await test('closing the enlarged dialog with ESC clears the enlarge button', () => {
+  // The bug this fixes, reported from the real app: pressing the button stuck it
+  // in its pressed style forever. A modal dialog makes the page inert, so the
+  // button could not be pressed a second time to undo it — the reader leaves
+  // with ESC or a backdrop click, and the surface heard nothing about it.
+  const { env } = mount(conversationFixture([
+    { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) },
+  ]))
+  const button = expandButton(env.document)
+  click(button)
+  eq(button.getAttribute('aria-pressed'), 'true', 'pressed while the dialog is open')
+
+  // The shim's `close()` is what the browser does on ESC and on a backdrop
+  // click, and it fires the same `close` event the dialog listens for.
+  const dialog = env.document.querySelector('dialog')
+  assert(dialog !== null, 'a dialog is open')
+  dialog.close()
+  eq(env.document.querySelector('dialog'), null, 'the dialog cleaned itself up')
+  eq(env.document.openDialogs, 0, 'and the page is interactive again')
+  eq(button.getAttribute('aria-pressed'), 'false', 'the button stopped claiming to be pressed')
+})
+
+await test('every enlarge string exists in both dictionaries', async () => {
+  // Reported from the real app as "没有中文". A missing key does not fail
+  // loudly — `t` falls back to the English literal — so the only way to catch
+  // it is to ask the dictionary directly.
+  const { DICTIONARIES } = await import('../src/client/locale.js')
+  for (const key of ['expand.label', 'html.modalTitle', 'html.modalClose']) {
+    eq(typeof DICTIONARIES.en[key], 'string', `en is missing ${key}`)
+    eq(typeof DICTIONARIES.zh[key], 'string', `zh is missing ${key}`)
+  }
+  eq(DICTIONARIES.zh['expand.label'], '放大', 'and it is actually translated')
+  // Every key present in one language must be present in the other, or a
+  // language silently falls back for whatever was added last.
+  eq(
+    Object.keys(DICTIONARIES.en).sort().join(),
+    Object.keys(DICTIONARIES.zh).sort().join(),
+    'the two dictionaries cover the same keys',
+  )
 })
 
 await test('a renderer with nothing to enlarge grows no control at all', () => {

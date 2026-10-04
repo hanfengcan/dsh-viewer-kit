@@ -337,6 +337,29 @@ export function createHtmlRenderer(t) {
       let releaseDialogListener = null
 
       /**
+       * Told when the enlarged view opens or closes by a route other than the
+       * surface's own button.
+       *
+       * A modal dialog makes the page inert, so while it is open the enlarge
+       * button **cannot be pressed again** — the reader leaves with ESC or the
+       * close control. Without this the button's pressed styling would stay on
+       * forever, describing a dialog that is no longer there.
+       *
+       * @type {Set<() => void>}
+       */
+      const expandListeners = new Set()
+
+      const notifyExpand = () => {
+        for (const listener of [...expandListeners]) {
+          try {
+            listener()
+          } catch {
+            /* a listener that throws must not strand the dialog */
+          }
+        }
+      }
+
+      /**
        * The cap an enlarged frame is measured against.
        *
        * Derived from the viewport rather than from `maxPreviewHeight`, because
@@ -361,8 +384,12 @@ export function createHtmlRenderer(t) {
         releaseDialogListener = null
         dialogFrame = null
         const open = dialog
-        // Cleared first so a re-entrant call (a `close` event firing a handler
-        // that closes again) is a no-op rather than a double remove.
+        // Cleared first so a re-entrant call is a no-op rather than a double
+        // remove — and it IS re-entrant: `open.close()` below fires the same
+        // `close` event this function is registered for. The early return is
+        // therefore also the "was anything actually open" test; reading the
+        // element's own `open` flag instead would be wrong, because on the ESC
+        // path the browser has already cleared it before firing the event.
         dialog = null
         if (open === null) return
         try {
@@ -374,12 +401,13 @@ export function createHtmlRenderer(t) {
           /* ignore */
         }
         try {
-          // Dropping the node drops the browsing context, which is what
-          // actually stops any timer or animation the enlarged document began.
+          // Dropping the node drops the browsing context, which is what actually
+          // stops any timer or animation the enlarged document started.
           open.remove()
         } catch {
           /* ignore */
         }
+        notifyExpand()
       }
 
       const openDialog = () => {
@@ -447,6 +475,13 @@ export function createHtmlRenderer(t) {
         view.addEventListener?.('message', onModalMessage)
         releaseDialogListener = () => view.removeEventListener?.('message', onModalMessage)
 
+        // The reader can dismiss this three ways — the ✕ button, ESC, or a
+        // backdrop click — and only the first one calls `closeDialog`. Without
+        // this, ESC and the backdrop would leave the node in the document with
+        // `open === false` and, worse, leave the enlarge button stuck in its
+        // pressed styling describing a dialog that is already gone.
+        dialog.addEventListener('close', closeDialog)
+
         // `showModal()` puts the element in the browser's **top layer**, which
         // is the only reason a hand-built overlay was not needed: a
         // `position: fixed` element is positioned against its nearest ancestor
@@ -455,6 +490,7 @@ export function createHtmlRenderer(t) {
         // escapes ancestor stacking and containing blocks by specification.
         // It also brings the backdrop, the ESC key and a focus trap for free.
         if (typeof dialog.showModal === 'function') dialog.showModal()
+        notifyExpand()
       }
 
       return {
@@ -466,6 +502,10 @@ export function createHtmlRenderer(t) {
             else closeDialog()
           },
           isOn: () => dialog !== null,
+          subscribe: (listener) => {
+            expandListeners.add(listener)
+            return () => expandListeners.delete(listener)
+          },
         },
 
         enter(viewId) {
@@ -482,6 +522,7 @@ export function createHtmlRenderer(t) {
           // thing standing between a scrolled-away block and a dialog left
           // covering the whole app.
           closeDialog()
+          expandListeners.clear()
           destroyFrame()
         },
       }
