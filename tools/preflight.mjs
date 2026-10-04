@@ -186,6 +186,14 @@ if (typeof mainRel === 'string' && existsSync(join(PKG_DIR, mainRel))) {
         ok(`${mainRel} exports a Config schema that rejects a bad value (${bad.issues[0].message})`)
       }
     }
+    // Prototype mode is the only capability that exists solely in the host
+    // half, so nothing else in this file would notice it going missing: the
+    // bundle would still activate and the config route would still answer.
+    if (!Array.isArray(host.inject) || !host.inject.includes('tools') || !host.inject.includes('systemPrompt')) {
+      problems.push(`${mainRel} does not inject [systemPrompt, tools]; prototype mode would register against absent services`)
+    } else {
+      ok(`${mainRel} injects [${host.inject.join(', ')}]`)
+    }
   } catch (error) {
     problems.push(`${mainRel} failed to import: ${error.message}`)
   }

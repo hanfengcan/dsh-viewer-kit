@@ -18,6 +18,10 @@
  * result over one read-only HTTP route that the client fetches before its
  * first scan.
  *
+ * It also registers `apply_prototype_style` and the one-shot prompt section
+ * behind it (`./tools/apply-prototype-style.js`), which is the only part of the
+ * kit that runs inside the model's own turn loop rather than the browser.
+ *
  * This is a workaround for a gap in DSH, not a designed channel. The community
  * plugin `dshmarket` bridges the same way (host `apply(ctx, config)` plus
  * `webServer.register`, client `fetch`), which is the precedent it follows.
@@ -28,15 +32,22 @@
  */
 
 import { Config, DEFAULT_CONFIG, resolveConfig } from './schema.js'
+import { registerPrototypeStyle } from './tools/apply-prototype-style.js'
 
 export { Config, DEFAULT_CONFIG }
 
 /**
- * Required services. Waiting for `webServer` means `apply` runs only where a
- * route can exist; on a host without it this half simply never activates, and
- * the client half falls back to the shipped defaults.
+ * Required services.
+ *
+ * Waiting for `webServer` means `apply` runs only where a route can exist; on a
+ * host without it this half simply never activates, and the client half falls
+ * back to the shipped defaults.
+ *
+ * `systemPrompt` and `tools` are hard dependencies because prototype mode
+ * registers into both, and a half that registered a tool with no section behind
+ * it would arm a flag nothing ever reads.
  */
-export const inject = ['webServer']
+export const inject = ['webServer', 'systemPrompt', 'tools']
 
 /**
  * The slice of the Host context this half uses, written out rather than
@@ -54,6 +65,8 @@ export const inject = ['webServer']
  * @property {{ register: (route: { kind: string, path: string, handler: (request: any, response: any) => void }) => () => void }} webServer
  *   Route table. `register` returns the disposer and **throws on a duplicate
  *   (kind, path)**, which is why the registration lives in an effect.
+ * @property {import('./tools/apply-prototype-style.js').PrototypeContext['tools']} tools
+ * @property {import('./tools/apply-prototype-style.js').PrototypeContext['systemPrompt']} systemPrompt
  */
 
 /**
@@ -70,7 +83,7 @@ export const CONFIG_ROUTE = '/dsh-viewer-kit/config'
 /**
  * @param {HostContext} ctx Host context.
  * @param {Record<string, unknown>} config Validated against {@link Config}.
- * @returns {void}
+ * @returns {() => void} Disposer releasing the prototype-style registrations.
  */
 export function apply(ctx, config) {
   // Cordis has already run the schema above, so every key is present and
@@ -111,4 +124,10 @@ export function apply(ctx, config) {
   // lines is the fastest way to spot a stale route or an old bundle.
   // eslint-disable-next-line no-console
   console.log(`[dsh-viewer-kit] host config published at ${CONFIG_ROUTE}: ${JSON.stringify(resolved)}`)
+
+  // Returned rather than wrapped in an effect: both registrations are already
+  // scoped to this fiber, and cordis runs a disposer returned from `apply` on
+  // unload. Registering inside an effect here would ALSO run it immediately, so
+  // the tool and the section would come up before the route above does.
+  return registerPrototypeStyle(ctx, resolved)
 }

@@ -242,6 +242,11 @@ const SWITCH_ATTRIBUTE = "data-dvk-switch";
 *   an opaque-origin sandbox. **Off by default**; see docs/01-architecture.md §8.
 * @property {boolean} [defaultToPreview] Open a freshly seen item in its
 *   enhanced view instead of the code view. **On by default.**
+* @property {string} [prototypeStyle] Style specification injected for the one
+*   response after the `apply_prototype_style` tool fires. **Host-only** — no
+*   renderer reads it, and the client drops it when re-resolving. `''` is a real
+*   value meaning "use the shipped specification", not "unset"; see
+*   `src/schema.js`.
 */
 /** The view every surface always offers, rendered by the host itself. */
 const CODE_VIEW = Object.freeze({
@@ -1027,11 +1032,59 @@ function createDomSeam(options) {
 *
 * @typedef {object} Field
 * @property {string} key
-* @property {'boolean' | 'natural' | 'positive' | 'enum' | 'stringList'} kind
+* @property {'boolean' | 'natural' | 'positive' | 'enum' | 'stringList' | 'text'} kind
 * @property {string | number | boolean | string[]} fallback
 * @property {readonly string[]} [values] enum members, when `kind` is 'enum'
 * @property {string} doc
 */
+/**
+* The shipped low-fidelity prototype style specification.
+*
+* This is the default **value** of the `prototypeStyle` option, not a second
+* description of it, which is why it lives here beside the field table rather
+* than with the tool that injects it (`tools/apply-prototype-style.js`).
+*
+* The option falls back to `''` rather than to this string. That keeps the
+* resolved config — which is published verbatim over `CONFIG_ROUTE` and printed
+* on one startup line — a single short scalar, and keeps `patchDocumentation`
+* from emitting forty escaped lines into `cordis.patch.yml`. The cost is that
+* "empty means shipped" is a rule the reader has to be told once; the field's
+* `doc` and the README both say it.
+*
+* Prompt text, so it is written for a model rather than for a person reading a
+* config file: imperative, and every rule is checkable against the markup.
+*
+* @type {string}
+*/
+const DEFAULT_PROTOTYPE_STYLE = [
+	"# Low-fidelity HTML prototype style",
+	"",
+	"These rules apply to the HTML you emit in THIS response only. They expire",
+	"immediately after it; ordinary conversation is unaffected.",
+	"",
+	"## Colour",
+	"Greyscale only: #333 body text, #666 secondary text, #999 placeholder or",
+	"disabled text, #ccc borders and dividers, #eee background fills.",
+	"No colour of any kind, no gradient, no shadow.",
+	"",
+	"## Type",
+	"font-family: system-ui, -apple-system, sans-serif",
+	"",
+	"## Controls",
+	"Buttons and inputs: border 1px solid #ccc; border-radius 4px; box-shadow none.",
+	"Cards: border 1px solid #ddd; border-radius 4px; box-shadow none.",
+	"",
+	"## Forbidden",
+	"- External CSS frameworks (Tailwind, Bootstrap, Ant Design, and the like).",
+	"- Gradients, box-shadows, animations, transitions.",
+	"- Icon libraries and icon fonts. Use plain text or a minimal CSS shape.",
+	"",
+	"## Structure",
+	"Every style lives in ONE <style> block. No inline style attributes.",
+	"",
+	"This is a wireframe, not a visual design: get hierarchy and layout right,",
+	"and do not spend effort on polish."
+].join("\n");
 /** @type {readonly Field[]} */
 const FIELDS = [
 	{
@@ -1140,6 +1193,27 @@ const FIELDS = [
 			"what the content *is*: a chart, a table, a page. Reading the markup is",
 			"the exception, so it costs a click."
 		].join("\n")
+	},
+	{
+		key: "prototypeStyle",
+		kind: "text",
+		fallback: "",
+		doc: [
+			"Replaces the built-in low-fidelity style specification injected by the",
+			"apply_prototype_style tool, for the one response that follows the call.",
+			"",
+			"Empty (the default) means the SHIPPED specification is used. The shipped",
+			"text is a greyscale wireframe house style: #333/#666/#999/#ccc/#eee only,",
+			"system-ui type, 1px #ccc or #ddd borders, 4px radii, no shadows, no",
+			"gradients, no animation, no icon libraries, and one central <style> block",
+			"rather than inline styles.",
+			"",
+			"Set it to any non-empty string to inject that text instead — useful when",
+			"your own house style, or a different wireframe convention, has to be the",
+			"one the model is held to. It is a one-shot injection: the next",
+			"assembled request consumes it and the text stops appearing, whether or",
+			"not the model acknowledges it."
+		].join("\n")
 	}
 ];
 /**
@@ -1156,6 +1230,7 @@ function accepts(field, value) {
 		case "positive": return typeof value === "number" && Number.isFinite(value) && value > 0;
 		case "enum": return typeof value === "string" && (field.values ?? []).includes(value);
 		case "stringList": return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+		case "text": return typeof value === "string";
 		default: return false;
 	}
 }

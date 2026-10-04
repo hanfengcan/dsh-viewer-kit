@@ -36,7 +36,7 @@
 pnpm install
 pnpm run build       # tsdown 打客户端 + 拷贝宿主半体到 lib/
 pnpm run typecheck   # tsc --noEmit（含 checkJs）
-pnpm test            # 128 项测试
+pnpm test            # 142 项测试
 pnpm run repro       # 单独跑一次激活复现，带栈
 pnpm run check       # typecheck → build → test → repro → probe:test → probe
 pnpm run preflight   # 打包 → 解包 → 校验 → 清理
@@ -200,7 +200,7 @@ fiber 重启也救不了：模块已被 ESM loader 缓存进正在跑的进程�
 ## 6. 目录
 
 ```
-src/index.js                 Host 半体：导出 Config、注册配置路由
+src/index.js                 Host 半体：导出 Config、注册配置路由、装配工具
 src/schema.js                ★ 配置的字段表（默认值 / 校验 / patch 文档的唯一来源）
 src/client/
   index.js                   入口：apply(ctx, config)
@@ -213,7 +213,9 @@ src/client/
   chunk-loader.js            按需加载引擎 chunk（走 DSH 原生 chunk 机制）
   chunks/echarts.js          引擎本体，独立成文件，不进入口 bundle
   renderers/                 L5 渲染器：echarts / html / table
-tests/                       128 项测试 + 探针负向测试 + DOM 垫片 + 从 DSH 产物抄来的夹具
+src/tools/
+  apply-prototype-style.js    apply_prototype_style 工具 + 一次性 prompt 段落
+tests/                       142 项测试 + 探针负向测试 + DOM 垫片 + 从 DSH 产物抄来的夹具
 tools/probe-host.mjs         ★ 宿主契约探针（读 app.asar）
 tools/preflight.mjs          打包后自检
 docs/01-architecture.md      架构与取舍的完整记录（§ 引用它，别在注释里重述）

@@ -1432,9 +1432,12 @@ await test('the built bundle is syntactically loadable as a classic script', () 
 const { loadHostConfig, configUrl, CONFIG_PATH, CONFIG_TIMEOUT_MS } = await import(
   '../src/client/host-config.js'
 )
-const { patchDocumentation, Config: require$schema, DEFAULT_CONFIG: SCHEMA_DEFAULTS } = await import(
-  '../src/schema.js'
-)
+const {
+  patchDocumentation,
+  Config: require$schema,
+  DEFAULT_CONFIG: SCHEMA_DEFAULTS,
+  DEFAULT_PROTOTYPE_STYLE,
+} = await import('../src/schema.js')
 
 /**
  * A `setTimeout` that never fires, so the success paths are not raced by the
@@ -2141,11 +2144,88 @@ await test('the shipped patch documents every option, generated from the schema'
   for (const [key, value] of Object.entries(SCHEMA_DEFAULTS)) {
     assert(patch.includes(`        ${key}: ${JSON.stringify(value)}`), `cordis.patch.yml is missing "${key}"`)
   }
-  eq(Object.keys(SCHEMA_DEFAULTS).length, 9, 'nine options, and the patch documents exactly those')
+  eq(Object.keys(SCHEMA_DEFAULTS).length, 10, 'ten options, and the patch documents exactly those')
   eq(require$schema['~standard'].validate({}).issues, undefined, 'an empty config is valid')
   const bad = require$schema['~standard'].validate({ maxPreviewHeight: 'tall' })
   assert(Array.isArray(bad.issues) && bad.issues.length > 0, 'a bad value is an issue, not a value')
   eq(bad.issues[0].path, ['maxPreviewHeight'], 'the issue names the key')
+})
+
+/**
+ * Is every uncommented line in this patch file correctly indented?
+ *
+ * DSH refuses to load a plugin whose patch file will not parse, and the failure
+ * names a line number in a file the reader did not write. This file's real
+ * content is a tiny, fixed subset of YAML — block mappings and block
+ * sequences, no anchors, no flow collections, no multi-line scalars — so the
+ * one rule that matters is checked directly instead of pulling in a parser:
+ *
+ *   a line may sit deeper than the line above it only if that line OPENS a
+ *   block, meaning it ends with `:` (a mapping with no inline value) or is a
+ *   bare `-`.
+ *
+ * That is precisely the invariant a commented-out `config:` breaks. With the
+ * key commented, the first option line is a mapping entry indented under
+ * `name:`, which is a scalar, and the host rejects the whole overlay.
+ *
+ * A sequence item is compared by the column its own content starts at, not by
+ * the dash, so `- id: x` is correctly read as opening a mapping for the lines
+ * that follow rather than as a closed value.
+ *
+ * @param {string} yaml
+ * @returns {string[]} one message per violation; empty means sound
+ */
+function indentationFaults(yaml) {
+  /** @type {{ indent: number, text: string } | null} */
+  let previous = null
+  const faults = []
+  for (const [index, raw] of yaml.split('\n').entries()) {
+    const line = raw.replace(/\s+$/, '')
+    if (line.trim() === '' || line.trimStart().startsWith('#')) continue
+    if (/^\s*\t/.test(line)) faults.push(`line ${index + 1}: a tab in indentation`)
+    const indent = line.length - line.trimStart().length
+    const text = line.trim()
+    if (previous !== null && indent > previous.indent) {
+      const opens = /:\s*$/.test(previous.text.replace(/^-\s+/, ''))
+      if (!opens) {
+        faults.push(`line ${index + 1}: "${text}" is indented under "${previous.text}", which is already a complete value`)
+      }
+    }
+    // A `- ` item's mapping continues at the column after the dash, so that is
+    // the column a following line has to match, not the dash's own.
+    previous = { indent: indent + (text === '-' ? 0 : text.startsWith('- ') ? 2 : 0), text }
+  }
+  return faults
+}
+
+await test('the shipped patch is validly indented, so the host can parse it', () => {
+  // The guard above proves the option table is present and current. It cannot
+  // prove the file PARSES: it compares generated text against the file as a
+  // substring, and a file can hold a perfectly current copy of the table while
+  // the mapping it sits in is malformed. That is not hypothetical — the table
+  // shipped under a commented-out `config:` for several releases, every test
+  // stayed green, and the host refused to load the plugin at all.
+  const patch = readFileSync(join(ROOT, 'cordis.patch.yml'), 'utf8')
+  const faults = indentationFaults(patch)
+  assert(faults.length === 0, `cordis.patch.yml would not parse:\n         ${faults.join('\n         ')}`)
+
+  // The specific shape that failed: the options must hang off a real `config:`
+  // key, not off whatever real key happens to precede them.
+  assert(/^\s{6}config:\s*$/m.test(patch), 'the config key is present and NOT commented out')
+})
+
+await test('the indentation check rejects a mapping left under a closed value', () => {
+  // A check that cannot go red is worse than no check. This is the exact file
+  // shape that shipped broken, reduced to the few lines that break it.
+  const broken = ['- insert:', '    - id: k', "      name: 'k'", '      # config:', '        enabled: true'].join('\n')
+  const faults = indentationFaults(broken)
+  eq(faults.length, 1, `exactly one fault in the broken shape: ${JSON.stringify(faults)}`)
+  assert(faults[0].includes('enabled: true'), `the fault names the offending line: ${faults[0]}`)
+
+  // And the same file with the key live is sound, so the rule is not simply
+  // rejecting everything it is shown.
+  const fixed = ['- insert:', '    - id: k', "      name: 'k'", '      config:', '        enabled: true'].join('\n')
+  eq(indentationFaults(fixed), [], 'uncommenting the key makes the same file sound')
 })
 
 await test('the README quotes the current version and tarball name', () => {  const manifest = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
@@ -2155,6 +2235,221 @@ await test('the README quotes the current version and tarball name', () => {  co
     readme.includes(`dsh-viewer-kit-${manifest.version}.tgz`),
     `the README's tarball name is not ${manifest.version} — npm pack produces dsh-viewer-kit-${manifest.version}.tgz`,
   )
+})
+
+// ---------------------------------------------------------------------------
+// Prototype mode — the one-shot style injection.
+//
+// This is the only part of the kit that runs inside the model's own turn loop,
+// so it is tested against a fake host that behaves like the real one in the ways
+// that matter: `tools.register` and `systemPrompt.section` both return their
+// disposer, and a section's `text` may be a function the assembler calls on
+// every request. The assembly loop is modelled explicitly — `assemble()` is this
+// file's stand-in for "the host rebuilt the system prompt" — because the whole
+// feature is a statement about what one assembly does to the next.
+// ---------------------------------------------------------------------------
+
+const { registerPrototypeStyle, PROTOTYPE_TOOL, PROTOTYPE_SECTION } = await import(
+  '../src/tools/apply-prototype-style.js'
+)
+const host = await import('../src/index.js')
+
+/**
+ * A host half wired to recording stubs.
+ *
+ * `assemble()` runs every registered section's `text`, which is exactly what the
+ * real service does before a model step. Sections whose `text` is a plain string
+ * — none here — would be returned verbatim; running them is harmless and keeps
+ * the stub from having to model that distinction.
+ */
+function hostHarness(overrides = {}) {
+  const sections = new Map()
+  const tools = new Map()
+  const routes = []
+  const ctx = {
+    effect: (callback) => callback(),
+    tools: {
+      register(definition) {
+        if (tools.has(definition.name)) throw new Error(`duplicate tool ${definition.name}`)
+        tools.set(definition.name, definition)
+        return () => tools.delete(definition.name)
+      },
+    },
+    systemPrompt: {
+      section(section) {
+        if (sections.has(section.name)) throw new Error(`duplicate section ${section.name}`)
+        sections.set(section.name, section)
+        return () => sections.delete(section.name)
+      },
+    },
+    webServer: {
+      register(route) {
+        routes.push(route)
+        return () => {
+          const at = routes.indexOf(route)
+          if (at >= 0) routes.splice(at, 1)
+        }
+      },
+    },
+  }
+  return {
+    ctx,
+    tools,
+    sections,
+    routes,
+    assemble: () => [...sections.values()].map((s) => (typeof s.text === 'function' ? s.text({}) : s.text)),
+  }
+}
+
+await test('prototype mode is inert until the model asks for it', () => {
+  const h = hostHarness()
+  h.ctx.effect(() => {})
+  registerPrototypeStyle(h.ctx, { prototypeStyle: '' })
+  const section = h.sections.get(PROTOTYPE_SECTION)
+  assert(section !== undefined, 'the section is registered at apply time, not on demand')
+  // The whole cost of the feature while idle: an empty string the assembler drops.
+  eq(h.assemble().filter((text) => text !== '').length, 0, 'an unarmed section contributes nothing')
+  eq(h.assemble(), [''], 'and it keeps costing nothing on later assemblies')
+})
+
+await test('the injected specification appears once, then expires on its own', async () => {
+  const h = hostHarness()
+  registerPrototypeStyle(h.ctx, { prototypeStyle: '' })
+  const tool = h.tools.get(PROTOTYPE_TOOL)
+  assert(tool !== undefined, `${PROTOTYPE_TOOL} is registered`)
+
+  eq(await tool.execute({}, {}), { armed: true }, 'the tool reports that it armed')
+
+  const first = h.assemble()
+  eq(first.length, 1, 'exactly one section carries text after the call')
+  assert(first[0].includes('#333'), 'the shipped specification reached the prompt')
+  assert(first[0].includes('system-ui'), 'and it is the shipped one, not an override')
+
+  // The load-bearing assertion. A model that never acknowledges the injection
+  // must still find it gone, because the section cleared itself on the way out.
+  eq(h.assemble(), [''], 'the next assembly is empty again')
+  eq(h.assemble(), [''], 'and every assembly after that')
+})
+
+await test('the model cannot leave the mode on, because it has no way to', async () => {
+  const h = hostHarness()
+  registerPrototypeStyle(h.ctx, { prototypeStyle: '' })
+  const tool = h.tools.get(PROTOTYPE_TOOL)
+
+  await tool.execute({}, {})
+  h.assemble()
+
+  // Every tool the model can see, and none of them turns the mode off. If a
+  // future edit adds one, this stops holding — which is the point: the guarantee
+  // is that expiry does not depend on the model choosing to act.
+  const names = [...h.tools.keys()]
+  eq(names, [PROTOTYPE_TOOL], 'the mode registers exactly one tool, and it only opens')
+  const declaration = tool.description.toLowerCase()
+  assert(declaration.includes('expires'), 'the tool tells the model nothing is needed to switch it off')
+  assert(
+    tool.parameters.type === 'object' && Object.keys(tool.parameters.properties ?? {}).length === 0,
+    'it takes no arguments, so there is no argument with which to forget',
+  )
+})
+
+await test('two calls arm two injections, not one held-open mode', async () => {
+  const h = hostHarness()
+  registerPrototypeStyle(h.ctx, { prototypeStyle: '' })
+  const tool = h.tools.get(PROTOTYPE_TOOL)
+
+  await tool.execute({}, {})
+  await tool.execute({}, {})
+  h.assemble()
+  eq(h.assemble(), [''], 'both calls collapse into one injection and it is spent')
+})
+
+await test('a configured prototypeStyle replaces the shipped specification', async () => {
+  const h = hostHarness()
+  registerPrototypeStyle(h.ctx, { prototypeStyle: 'Use the house palette: #101010 on #fafafa.' })
+  const tool = h.tools.get(PROTOTYPE_TOOL)
+
+  eq(h.assemble(), [''], 'still inert before the call')
+  await tool.execute({}, {})
+  const [text] = h.assemble()
+  assert(text.includes('#101010'), 'the override is what gets injected')
+  assert(!text.includes('system-ui'), 'and the shipped text is not appended to it')
+})
+
+await test('an empty prototypeStyle means the shipped specification, not no specification', async () => {
+  const h = hostHarness()
+  registerPrototypeStyle(h.ctx, resolveConfig({ prototypeStyle: '' }))
+  await h.tools.get(PROTOTYPE_TOOL).execute({}, {})
+  const [text] = h.assemble()
+  assert(text.length > 0, 'the empty default resolves to real prompt text')
+  assert(text === DEFAULT_PROTOTYPE_STYLE, 'and to the shipped specification exactly')
+})
+
+await test('a bad prototypeStyle falls back rather than failing the row', () => {
+  eq(resolveConfig({ prototypeStyle: 42 }).prototypeStyle, '', 'a number is not a specification')
+  eq(resolveConfig({ prototypeStyle: '' }).prototypeStyle, '', 'empty is accepted as the default')
+  eq(resolveConfig({ prototypeStyle: 'x' }).prototypeStyle, 'x', 'any string is accepted')
+  const bad = require$schema['~standard'].validate({ prototypeStyle: 42 })
+  assert(Array.isArray(bad.issues) && bad.issues.length > 0, 'and the host half rejects it loudly')
+  eq(bad.issues[0].path, ['prototypeStyle'], 'the issue names the key')
+})
+
+await test('unloading the plugin takes the tool and the section with it', () => {
+  const h = hostHarness()
+  const dispose = registerPrototypeStyle(h.ctx, { prototypeStyle: '' })
+  eq(h.tools.size, 1, 'the tool is live')
+  eq(h.sections.size, 1, 'the section is live')
+
+  dispose()
+  eq(h.tools.size, 0, 'no tool survives the disposer')
+  eq(h.sections.size, 0, 'and no section does')
+  eq(h.assemble(), [], 'so a later assembly has nothing of ours to contribute')
+})
+
+await test('apply() returns a disposer that releases prototype mode', () => {
+  const h = hostHarness()
+  const dispose = host.apply(h.ctx, {})
+  assert(typeof dispose === 'function', 'apply returns the prototype-style disposer')
+  assert(h.tools.has(PROTOTYPE_TOOL), 'and the tool is registered when it returns')
+  dispose()
+  eq(h.tools.size, 0, 'calling it unregisters the tool')
+})
+
+await test('the host half declares the services it registers into', () => {
+  assert(host.inject.includes('systemPrompt'), 'systemPrompt is a hard dependency')
+  assert(host.inject.includes('tools'), 'tools is a hard dependency')
+})
+
+await test('the section sits after the persona and before tool guidance', () => {
+  const h = hostHarness()
+  registerPrototypeStyle(h.ctx, { prototypeStyle: '' })
+  const order = h.sections.get(PROTOTYPE_SECTION).order
+  assert(Number.isFinite(order), 'the order is a finite number, as the service requires')
+  // The host's named placements this has to sit between. Read from the source
+  // of truth rather than restated, so a host upgrade that moves one of them
+  // turns this red instead of quietly burying the section under tool guidance.
+  assert(order > 0, 'after DEPLOYMENT_PERSONA_PREFIX (0)')
+  assert(order < 500, 'before PLAN_POLICY (500) and the tool sections (1000+)')
+})
+
+await test('the prototype tool declares the output the tools pipeline requires', () => {
+  const h = hostHarness()
+  registerPrototypeStyle(h.ctx, { prototypeStyle: '' })
+  const tool = h.tools.get(PROTOTYPE_TOOL)
+  // `output` is not optional on a ToolDefinition; a tool without it renders no
+  // content block at all, which the model sees as an empty reply.
+  assert(tool.output !== undefined, 'output is declared')
+  eq(typeof tool.output.render, 'function', 'with a render function')
+  const blocks = tool.output.render({}, { armed: true })
+  assert(Array.isArray(blocks) && blocks.length > 0, 'which produces content')
+  eq(blocks[0].type, 'text', 'of the content-block kind the pipeline renders')
+  // Absent `isConcurrencySafe`, the tools pipeline classifies a call as
+  // EXCLUSIVE. That is required here: the call flips state that the very next
+  // prompt assembly reads, so two of them must never interleave.
+  //
+  // Tested with `in`, not `eq(x, undefined)`: `eq` compares through
+  // `JSON.stringify`, and a function stringifies to `undefined`, so an `eq`
+  // assertion here would pass whether the key was absent or set to a function.
+  assert(!('isConcurrencySafe' in tool), 'the call stays exclusive by default')
 })
 
 await test('the README states the exact number of tests this file declares', () => {

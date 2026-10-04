@@ -6,10 +6,10 @@
 #
 # ── Configuration ────────────────────────────────────────────────────────────
 #
-# Everything below is optional. Uncomment a key to change this plugin's shipped
-# default for every profile that lists it; to change it for ONE profile only,
-# put the same block in that profile's own cordis.patch.yml instead (user
-# patches apply after bundle patches and win by row id):
+# The `config:` block below ships with every option set to its own default, so
+# editing a value in place is all it takes to change one. To change it for ONE
+# profile only, put the block in that profile's own cordis.patch.yml instead
+# (user patches apply after bundle patches and win by row id):
 #
 #   # $DSH_HOME/profiles/<name>/cordis.patch.yml
 #   - id: dsh-viewer-kit
@@ -36,7 +36,7 @@
 - insert:
     - id: dsh-viewer-kit
       name: 'dsh-viewer-kit'
-      # config:
+      config:
         # Master switch. false leaves every code block to the host.
         #
         # default: true
@@ -115,3 +115,21 @@
         #
         # default: true
         defaultToPreview: true
+
+        # Replaces the built-in low-fidelity style specification injected by the
+        # apply_prototype_style tool, for the one response that follows the call.
+        #
+        # Empty (the default) means the SHIPPED specification is used. The shipped
+        # text is a greyscale wireframe house style: #333/#666/#999/#ccc/#eee only,
+        # system-ui type, 1px #ccc or #ddd borders, 4px radii, no shadows, no
+        # gradients, no animation, no icon libraries, and one central <style> block
+        # rather than inline styles.
+        #
+        # Set it to any non-empty string to inject that text instead — useful when
+        # your own house style, or a different wireframe convention, has to be the
+        # one the model is held to. It is a one-shot injection: the next
+        # assembled request consumes it and the text stops appearing, whether or
+        # not the model acknowledges it.
+        #
+        # default: ""
+        prototypeStyle: ""

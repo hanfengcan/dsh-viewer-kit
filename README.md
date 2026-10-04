@@ -28,6 +28,52 @@
 > **`echarts` 围栏不需要写 HTML。** 只写 ECharts 的 option JSON 就够了，不用引 CDN、
 > 不用 `<script>`、也不需要打开 `htmlAllowScripts` —— 引擎是插件自己按需加载的代码。
 
+### 原型模式：一次性注入风格规范
+
+当你说「把这段沟通内容做成 HTML 原型」时，模型会调用一个工具 `apply_prototype_style`。
+**紧接着的那一次请求里**会被注入一段固定的风格规范（默认是 Mockplus 式低保真：
+黑白灰、无阴影、无外部 CSS 框架、样式集中在一个 `<style>` 块），模型照着输出原型。
+
+**注入一次就自动失效**，后续正常对话完全不受影响；下次要原型时再触发一次。
+
+状态的生命周期由提示词组装器管，**不由模型管**：模型只负责触发，没有任何"关闭"的动作
+可用。所以即使模型"忘了关"，约束也只生效一轮。
+
+> **默认规范是英文的。** 它是喂给模型的提示词，不是给你读的配置项。想要中文规范
+> （或者你们团队自己的配色、栅格、组件约定），用 `prototypeStyle` 配置项整体替换。
+
+默认注入的规范原文：
+
+```
+# Low-fidelity HTML prototype style
+
+These rules apply to the HTML you emit in THIS response only. They expire
+immediately after it; ordinary conversation is unaffected.
+
+## Colour
+Greyscale only: #333 body text, #666 secondary text, #999 placeholder or
+disabled text, #ccc borders and dividers, #eee background fills.
+No colour of any kind, no gradient, no shadow.
+
+## Type
+font-family: system-ui, -apple-system, sans-serif
+
+## Controls
+Buttons and inputs: border 1px solid #ccc; border-radius 4px; box-shadow none.
+Cards: border 1px solid #ddd; border-radius 4px; box-shadow none.
+
+## Forbidden
+- External CSS frameworks (Tailwind, Bootstrap, Ant Design, and the like).
+- Gradients, box-shadows, animations, transitions.
+- Icon libraries and icon fonts. Use plain text or a minimal CSS shape.
+
+## Structure
+Every style lives in ONE <style> block. No inline style attributes.
+
+This is a wireframe, not a visual design: get hierarchy and layout right,
+and do not spend effort on polish.
+```
+
 ### 实际效果
 
 以下截图取自 DSH Desktop `0.2.0-rc.2` 真实运行，未做修饰。
@@ -105,6 +151,7 @@
 | `htmlAllowScripts` | `false` | 允许预览里的 HTML 执行**它自己的**脚本 |
 | `maxSourceBytes` | `262144` | 超过这个大小的源码保持原生代码块 |
 | `disabledRendererIds` | `[]` | 关掉个别渲染器，**两层语义** —— 见下 |
+| `prototypeStyle` | `""` | 替换原型模式注入的风格规范；空串 = 用内置的那份 —— 见上 |
 
 **值写错了会怎样**：宿主半体**响亮报错**并拒绝这一行，而客户端半体**静默回落默认值**。
 两边的严格程度故意不同，理由和排查顺序见 [`AGENTS.md`](AGENTS.md) §1。
@@ -216,7 +263,7 @@ __DSH_VIEWER_KIT__.diagnose()
 
 ```powershell
 pnpm install
-pnpm run check        # 类型检查 → 构建 → 128 项测试 → 产物激活复现 → 宿主契约探针
+pnpm run check        # 类型检查 → 构建 → 142 项测试 → 产物激活复现 → 宿主契约探针
 pnpm run release      # check + 打包自检，完整发布门禁
 ```
 
