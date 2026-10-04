@@ -264,7 +264,13 @@ export function createHtmlRenderer(t) {
         const height = Number(data.height)
         if (!Number.isFinite(height) || height <= 0) return
         measured = true
-        frame.style.height = `${Math.min(limits.maxPreviewHeight, Math.ceil(height))}px`
+        // Write only on a real change. The measuring document reports on load,
+        // twice more on timers, and on every ResizeObserver tick, so the same
+        // height arrives repeatedly; assigning it again dirties layout each time
+        // for no visual result, and layout is what moves the reader's scroll
+        // position when it lands on an anchored block.
+        const next = `${Math.min(limits.maxPreviewHeight, Math.ceil(height))}px`
+        if (frame.style.height !== next) frame.style.height = next
       }
 
       const destroyFrame = () => {
@@ -470,7 +476,10 @@ export function createHtmlRenderer(t) {
           if (data == null || data.__dvk !== 'height' || data.id !== frameId) return
           const height = Number(data.height)
           if (!Number.isFinite(height) || height <= 0) return
-          dialogFrame.style.height = `${Math.min(cap, Math.ceil(height))}px`
+          // Same guard as the inline frame: a repeated identical report must not
+          // dirty layout again.
+          const next = `${Math.min(cap, Math.ceil(height))}px`
+          if (dialogFrame.style.height !== next) dialogFrame.style.height = next
         }
         view.addEventListener?.('message', onModalMessage)
         releaseDialogListener = () => view.removeEventListener?.('message', onModalMessage)

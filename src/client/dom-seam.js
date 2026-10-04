@@ -8,7 +8,7 @@
  * @module dom-seam
  */
 
-import { BANNER_SELECTOR, CODE_BLOCK_SELECTOR, CONTENT_SELECTOR, MAX_QUIET_RETRIES, NODE_SCOPE_ATTRIBUTE, PLAIN_SETTLE_MS, PRE_SELECTOR } from './dom-contract.js'
+import { BANNER_SELECTOR, CODE_BLOCK_SELECTOR, CONTENT_SELECTOR, MAX_QUIET_RETRIES, NODE_SCOPE_ATTRIBUTE, PLAIN_SETTLE_MS, PRE_SELECTOR, SWITCH_ATTRIBUTE } from './dom-contract.js'
 import { createCodeBlockSurface } from './code-block-surface.js'
 import { normalizeLang } from './contract.js'
 
@@ -219,13 +219,48 @@ export function createDomSeam(options) {
   let disposed = false
 
   /**
+   * Are the nodes this plugin injected into a block still on the page?
+   *
+   * The switch is the witness because it is the one node a block cannot be
+   * useful without: the block renders perfectly well with the switch gone, which
+   * is what makes the loss silent. The expand button is deliberately not
+   * consulted — it is optional (a renderer may offer no `expand`), so its absence
+   * says nothing about ownership.
+   *
+   * @param {Element} element
+   * @returns {boolean}
+   */
+  function ownsInjection(element) {
+    return element.querySelector(`[${SWITCH_ATTRIBUTE}]`) !== null
+  }
+
+  /**
    * Decide whether a block is ready, and either take it over or schedule a
    * re-check for a plain block that has gone quiet.
    *
    * @param {Element} element
    */
   function evaluate(element) {
-    if (disposed || surfaces.has(element)) return
+    if (disposed) return
+    if (surfaces.has(element)) {
+      // A React re-render can replace a block's banner subtree — the trailing
+      // action group our switch was appended into — while leaving the block
+      // element itself in place. Our nodes go with the subtree, the mutation
+      // that did it calls straight back in here, and a bare `surfaces.has` guard
+      // would send that recovery straight back out again. The block would keep
+      // rendering with no switch and nothing would ever put it back, which is
+      // the same failure as a block that was never claimed.
+      //
+      // So a claim is honoured only while the nodes it made are still there.
+      // Anything else is treated as an orphaned claim: released, then re-made.
+      if (ownsInjection(element)) return
+      try {
+        surfaces.get(element)?.dispose()
+      } catch {
+        /* ignore */
+      }
+      surfaces.delete(element)
+    }
     // Not our surface to touch. Deliberately no `schedule`: a block in another
     // panel will never become a conversation block, so retrying it would only
     // burn the retry budget and log noise.

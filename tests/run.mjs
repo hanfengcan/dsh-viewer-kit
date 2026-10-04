@@ -469,6 +469,39 @@ await test('the view choice is remembered for the same content', () => {
   eq(frame(second.env.document), null, 'and built no preview')
 })
 
+await test('a block that was only ever opened on the default remembers nothing', () => {
+  // The view a block OPENS on is read from `defaultToPreview`. Recording it as
+  // though the reader had chosen it freezes the setting on first sight, which
+  // is what made `defaultToPreview` unchangeable for every block already seen.
+  const storage = new ShimStorage()
+  const first = mount(conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) }]), { storage })
+  eq(switcher(first.env.document).children[0].getAttribute('aria-pressed'), 'true', 'opened on preview, the shipped default')
+  first.seam.dispose()
+  eq(storage.getItem('dsh-viewer-kit:views:v1'), null, 'and left no record behind')
+
+  // Same storage, opposite setting: the block follows the new default.
+  const second = mount(
+    conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) }]),
+    { storage, config: { defaultToPreview: false } },
+  )
+  eq(switcher(second.env.document).children[1].getAttribute('aria-pressed'), 'true', 'reopened on code, because the default changed')
+})
+
+await test('a view the reader did pick still survives a reload', () => {
+  // The half of the behaviour worth keeping: memory records CHOICES. Written
+  // against the same storage twice, so a pass means the entry is real rather
+  // than a coincidence of the default.
+  const storage = new ShimStorage()
+  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) }])
+  const first = mount(html, { storage })
+  click(switcher(first.env.document).children[1])
+  first.seam.dispose()
+
+  const second = mount(html, { storage })
+  eq(switcher(second.env.document).children[1].getAttribute('aria-pressed'), 'true', 'the click was remembered')
+  eq(frame(second.env.document), null, 'and the block reopened on code')
+})
+
 await test('different content does not inherit a remembered view', () => {
   const storage = new ShimStorage()
   const first = mount(conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) }]), { storage })
@@ -1826,6 +1859,52 @@ await test('the measured height wins over the estimate, and is capped', () => {
   eq(frame.style.height, '320px', 'a very tall document stops at the cap')
 })
 
+await test('an unchanged measurement does not write the height again', () => {
+  // The measuring document reports on load, twice more on timers, and on every
+  // ResizeObserver tick, so the settled height arrives repeatedly. Assigning it
+  // again dirties layout for no visual result, and layout is what moves a
+  // reader's scroll position when the resized block is the one they are on.
+  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p>hi</p>' }) }])
+  const { env } = mount(html, { config: { maxPreviewHeight: 320 } })
+  const frame = env.document.querySelector('iframe')
+  const view = env.document.defaultView
+
+  let writes = 0
+  let current = frame.style.height
+  Object.defineProperty(frame.style, 'height', {
+    get: () => current,
+    set: (value) => {
+      writes += 1
+      current = value
+    },
+  })
+
+  const report = (height) => view.postMessage({ source: frame.contentWindow, data: { __dvk: 'height', id: frameIdOf(frame.srcdoc), height } })
+
+  report(212)
+  eq(writes, 1, 'the first measurement writes')
+  eq(current, '212px', 'and it lands')
+
+  report(212)
+  report(212)
+  report(212)
+  eq(writes, 1, 'three more identical reports write nothing')
+  eq(current, '212px', 'the height is unchanged')
+
+  // A real correction still goes through — this is a dedupe, not a latch.
+  report(260)
+  eq(writes, 2, 'a genuinely different height writes again')
+  eq(current, '260px', 'and it lands')
+
+  // Two different heights that cap to the same value are the same write.
+  report(9000)
+  eq(writes, 3, 'the uncapped report over the cap writes once')
+  eq(current, '320px', 'and lands on the cap')
+  report(9001)
+  eq(writes, 3, 'a taller one that caps to the very same value is a no-op')
+  eq(current, '320px', 'still on the cap')
+})
+
 await test('the model document is the frame document, not a nested one', () => {
   // The first implementation nested the model's document in a second frame and
   // tried to read it from the outer one. That cannot work: sandbox flags are
@@ -2226,6 +2305,50 @@ await test('the indentation check rejects a mapping left under a closed value', 
   // rejecting everything it is shown.
   const fixed = ['- insert:', '    - id: k', "      name: 'k'", '      config:', '        enabled: true'].join('\n')
   eq(indentationFaults(fixed), [], 'uncommenting the key makes the same file sound')
+})
+
+await test('a block whose switch React wiped gets its switch back', () => {
+  const { env, seam } = mount(
+    conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) }]),
+  )
+  const doc = env.document
+  assert(switcher(doc) !== null, 'claimed on the first scan')
+
+  // What a React re-render does: it rebuilds the banner's trailing action group
+  // from its own state. It has no record of the nodes we appended there, so they
+  // go. The block element itself is untouched, and so is the preview below it.
+  const banner = doc.querySelector('[data-code-block-banner]')
+  const actionGroup = banner.lastElementChild
+  actionGroup.replaceChildren()
+
+  // Still claimed — the WeakMap has never heard of this.
+  eq(seam.size(), 1, 'the seam still counts the block as enhanced')
+
+  // The mutation React's own teardown produces must be enough to trigger
+  // recovery. Before the fix this re-entered `evaluate` and returned on the
+  // claim, so the block rendered with no way back to its source.
+  seam.scan()
+  const back = switcher(doc)
+  assert(back !== null, 'the switch came back')
+  eq(back.children.map((b) => b.getAttribute('data-dvk-view')), ['preview', 'code'], 'and it is a real two-view switch')
+  assert(content(doc).getAttribute('data-dvk-mode') === 'preview', 'the block is still showing its preview')
+})
+
+await test('a block that keeps its switch is not rebuilt on every scan', () => {
+  const { env, seam } = mount(
+    conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) }]),
+  )
+  const doc = env.document
+  const first = switcher(doc)
+
+  seam.scan()
+  seam.scan()
+
+  // Idempotence matters twice over: rebuilding on every scan would tear down
+  // and re-mount the preview frame under the reader, and would flash the block
+  // back to source each time it was re-evaluated.
+  assert(switcher(doc) === first, 'the very same switch node is still in place')
+  eq(seam.size(), 1, 'and the block is still claimed exactly once')
 })
 
 await test('the README quotes the current version and tarball name', () => {  const manifest = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))

@@ -190,7 +190,7 @@ export function createCodeBlockSurface(options) {
     button.setAttribute('data-dvk-view', view.id)
     button.setAttribute('aria-pressed', 'false')
     button.textContent = view.id === 'code' ? t('view.code', 'Code') : labelFor(view, t)
-    button.addEventListener('click', () => enter(view.id))
+    button.addEventListener('click', () => enter(view.id, true))
     switcher.appendChild(button)
     buttons.push(button)
   }
@@ -296,12 +296,16 @@ export function createCodeBlockSurface(options) {
 
   /**
    * @param {string} viewId
+   * @param {boolean} [byUser] True when a reader picked this view. Only a
+   *   deliberate choice is worth remembering: the view a block OPENS on is
+   *   derived from `defaultToPreview`, and persisting it would freeze that
+   *   setting on first sight and make the option unchangeable afterwards.
    */
-  function enter(viewId) {
+  function enter(viewId, byUser = false) {
     if (disposed) return
     if (!views.some((view) => view.id === viewId)) return
     current = viewId
-    kit.setView(request.id, viewId)
+    if (byUser) kit.setView(request.id, viewId)
     for (const button of buttons) {
       button.setAttribute('aria-pressed', String(button.getAttribute('data-dvk-view') === viewId))
     }
@@ -335,7 +339,8 @@ export function createCodeBlockSurface(options) {
     syncExpandControl(viewId)
   }
 
-  // Enter once so a block that opens in preview is already live.
+  // Enter once so a block that opens in preview is already live. No `byUser`:
+  // nothing was chosen yet, so this opening is a result, not a preference.
   current = pickInitialView()
   enter(current)
   report(renderer.id)

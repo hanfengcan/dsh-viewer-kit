@@ -263,7 +263,7 @@ __DSH_VIEWER_KIT__.diagnose()
 
 ```powershell
 pnpm install
-pnpm run check        # 类型检查 → 构建 → 142 项测试 → 产物激活复现 → 宿主契约探针
+pnpm run check        # 类型检查 → 构建 → 147 项测试 → 产物激活复现 → 宿主契约探针
 pnpm run release      # check + 打包自检，完整发布门禁
 ```
 

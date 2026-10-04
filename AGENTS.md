@@ -36,7 +36,7 @@
 pnpm install
 pnpm run build       # tsdown 打客户端 + 拷贝宿主半体到 lib/
 pnpm run typecheck   # tsc --noEmit（含 checkJs）
-pnpm test            # 142 项测试
+pnpm test            # 147 项测试
 pnpm run repro       # 单独跑一次激活复现，带栈
 pnpm run check       # typecheck → build → test → repro → probe:test → probe
 pnpm run preflight   # 打包 → 解包 → 校验 → 清理
@@ -215,7 +215,7 @@ src/client/
   renderers/                 L5 渲染器：echarts / html / table
 src/tools/
   apply-prototype-style.js    apply_prototype_style 工具 + 一次性 prompt 段落
-tests/                       142 项测试 + 探针负向测试 + DOM 垫片 + 从 DSH 产物抄来的夹具
+tests/                       147 项测试 + 探针负向测试 + DOM 垫片 + 从 DSH 产物抄来的夹具
 tools/probe-host.mjs         ★ 宿主契约探针（读 app.asar）
 tools/preflight.mjs          打包后自检
 docs/01-architecture.md      架构与取舍的完整记录（§ 引用它，别在注释里重述）

@@ -488,7 +488,7 @@ function createCodeBlockSurface(options) {
 		button.setAttribute("data-dvk-view", view.id);
 		button.setAttribute("aria-pressed", "false");
 		button.textContent = view.id === "code" ? t("view.code", "Code") : labelFor(view, t);
-		button.addEventListener("click", () => enter(view.id));
+		button.addEventListener("click", () => enter(view.id, true));
 		switcher.appendChild(button);
 		buttons.push(button);
 	}
@@ -560,12 +560,16 @@ function createCodeBlockSurface(options) {
 	}
 	/**
 	* @param {string} viewId
+	* @param {boolean} [byUser] True when a reader picked this view. Only a
+	*   deliberate choice is worth remembering: the view a block OPENS on is
+	*   derived from `defaultToPreview`, and persisting it would freeze that
+	*   setting on first sight and make the option unchangeable afterwards.
 	*/
-	function enter(viewId) {
+	function enter(viewId, byUser = false) {
 		if (disposed) return;
 		if (!views.some((view) => view.id === viewId)) return;
 		current = viewId;
-		kit.setView(request.id, viewId);
+		if (byUser) kit.setView(request.id, viewId);
 		for (const button of buttons) button.setAttribute("aria-pressed", String(button.getAttribute("data-dvk-view") === viewId));
 		content.setAttribute(MODE_ATTRIBUTE, viewId === "code" ? "code" : "preview");
 		viewRoot.replaceChildren();
@@ -807,13 +811,35 @@ function createDomSeam(options) {
 	const retryCounts = /* @__PURE__ */ new Map();
 	let disposed = false;
 	/**
+	* Are the nodes this plugin injected into a block still on the page?
+	*
+	* The switch is the witness because it is the one node a block cannot be
+	* useful without: the block renders perfectly well with the switch gone, which
+	* is what makes the loss silent. The expand button is deliberately not
+	* consulted — it is optional (a renderer may offer no `expand`), so its absence
+	* says nothing about ownership.
+	*
+	* @param {Element} element
+	* @returns {boolean}
+	*/
+	function ownsInjection(element) {
+		return element.querySelector(`[${SWITCH_ATTRIBUTE}]`) !== null;
+	}
+	/**
 	* Decide whether a block is ready, and either take it over or schedule a
 	* re-check for a plain block that has gone quiet.
 	*
 	* @param {Element} element
 	*/
 	function evaluate(element) {
-		if (disposed || surfaces.has(element)) return;
+		if (disposed) return;
+		if (surfaces.has(element)) {
+			if (ownsInjection(element)) return;
+			try {
+				surfaces.get(element)?.dispose();
+			} catch {}
+			surfaces.delete(element);
+		}
 		if (!inConversation(element)) return;
 		const content = element.querySelector(CONTENT_SELECTOR);
 		if (content === null) {
@@ -1883,7 +1909,8 @@ function createHtmlRenderer(t) {
 				const height = Number(data.height);
 				if (!Number.isFinite(height) || height <= 0) return;
 				measured = true;
-				frame.style.height = `${Math.min(limits.maxPreviewHeight, Math.ceil(height))}px`;
+				const next = `${Math.min(limits.maxPreviewHeight, Math.ceil(height))}px`;
+				if (frame.style.height !== next) frame.style.height = next;
 			};
 			const destroyFrame = () => {
 				frame?.remove();
@@ -2010,7 +2037,8 @@ function createHtmlRenderer(t) {
 					if (data == null || data.__dvk !== "height" || data.id !== frameId) return;
 					const height = Number(data.height);
 					if (!Number.isFinite(height) || height <= 0) return;
-					dialogFrame.style.height = `${Math.min(cap, Math.ceil(height))}px`;
+					const next = `${Math.min(cap, Math.ceil(height))}px`;
+					if (dialogFrame.style.height !== next) dialogFrame.style.height = next;
 				};
 				view.addEventListener?.("message", onModalMessage);
 				releaseDialogListener = () => view.removeEventListener?.("message", onModalMessage);
