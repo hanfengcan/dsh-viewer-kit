@@ -168,23 +168,39 @@ export const STYLES = `
 
 /* The enlarge control.
 
-   Deliberately NOT the switch's item class. That class is designed to sit
-   INSIDE a '.dvk-switch' container and reads as "one of the views"; reusing it
-   for a sibling action made the button inherit a pressed-pill look and be
-   mistaken for a selected view. This is a plain control: a thin border so it
-   reads as something pressable, and a hover tint as the affordance. */
+   An ICON button, matching the copy and branch controls DSH already draws in
+   this banner. The look is taken from the shipped CodeBlock module
+   (@deepseek-ai/dsh-client-ui-primitives/lib/markdown/CodeBlock.module.css,
+   its .copyButton rule): fully transparent, no border, no padding, and the
+   glyph is a 16x16 SVG filled with currentColor so it follows the banner's
+   text colour.
+
+   There is deliberately NO rule keyed on the button's own state, for two
+   independent reasons:
+
+     - A button that changes appearance when pressed was not wanted, and a state
+       rule is the only thing that could make it do so.
+     - A state rule and :hover have EQUAL specificity (a class plus one
+       qualifier each), so source order decides. A rule for
+       [aria-pressed='true'] sitting after :hover silently wins, and the hover
+       tint disappears — which is exactly what happened while this button
+       carried one.
+
+   The hover tint and the focus ring are the entire affordance: enough to read
+   as pressable without impersonating one of the view pills. */
 .dvk-expand {
   appearance: none;
-  border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.28));
-  margin: 0 0 0 4px;
-  padding: 0 8px;
-  height: 24px;
-  border-radius: var(--dsw-radius-sm, 6px);
-  font: 11px/18px var(--dsw-font-family, system-ui, sans-serif);
-  color: var(--dsw-alias-label-secondary, #666);
-  background: transparent;
+  border: none;
+  margin: 0 0 0 2px;
+  padding: 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: calc(var(--dsw-radius-sm, 6px) - 2px);
+  color: var(--dsw-alias-label-tertiary, #888);
+  background-color: rgb(255 255 255 / 0);
   cursor: pointer;
-  white-space: nowrap;
+  font: inherit;
 }
 .dvk-expand:hover {
   color: var(--dsw-alias-label-primary, #111);
@@ -194,12 +210,10 @@ export const STYLES = `
   outline: 1px solid var(--dsw-alias-state-business-primary, #4a7dff);
   outline-offset: 1px;
 }
-/* Pressed is a tint, not the white pill the view switch uses — it must not
-   read as "this view is selected". */
-.dvk-expand[aria-pressed='true'] {
-  color: var(--dsw-alias-label-primary, #111);
-  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.16));
-  border-color: var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.4));
+/* Block, so the button's box is exactly the glyph plus its padding. An inline
+   SVG sits on a text baseline and adds descender space below it. */
+.dvk-expand > svg {
+  display: block;
 }
 
 /* Enlarged preview.

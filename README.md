@@ -36,15 +36,35 @@
 | `table` | `maxTableHeight` 480 | **不是必须** —— 表格能自然撑开。封顶是为了不把对话拉长 |
 
 **放大控件不是全局的 —— 只有提供 `expand` 的渲染器才有按钮，没提供的连控件都不长。**
-目前是 **html 预览**和**表格**两个，行为由渲染器自己决定：
+它是**图标按钮**（DSH 自己的 `IconFullscreenOutline` 字形，纯 DOM 内联），目前有两个：
 
 - **表格**：就地取消高度封顶，整张表在对话里展开。再点一次恢复。
 - **HTML 预览**：开一个 **`<dialog>` 弹窗**，高度按视口的 86% 算，内容按真实高度撑开。
   短文档无滚动条、无留白；长文档只在物理上装不下时才出现滚动条。
 
+**按钮只在"真的有用"时才出现。** 渲染器可以提供一个可选的 `available()` 回答
+"放大能看到现在看不到的东西吗"。表格实现了它：**表格比 `maxTableHeight` 矮时本来就没被裁**，
+取消封顶一个像素都不会变 —— 那按钮就是个要你点了才知道没用的摆设。判据用
+`scrollHeight > clientHeight`（真正的溢出测试）而不是行数，因为同样行数换个字号高度就不同、
+单元格还会折行。
+
+**HTML 故意不实现 `available()`**：320px 的框变成视口高度的弹窗，**任何**文档都是另一个阅读面；
+按估算高度去卡会恰好把短报告挡在门外 —— 而那正是最想整篇看的。
+
 **图表没有放大控件。** 图表有确定的 `chartHeight`，不存在"内容比框高"那种失控 ——
 封顶和逃生口这一对只在高度会失控的渲染器上才成立。要给图表加也可行（ECharts 有
 `resize()`，ResizeObserver 已经在看着了），但那是另一件事。
+
+### 为什么图标是内联的，不是 import 的
+
+DSH **有**内置图标集（`@deepseek-ai/dsh-client-ui-primitives` 导出 368 个 `Icon*`），
+banner 里那个复制按钮用的就是 `IconCopyOutlineRegular`。但它们**是 React 组件**，
+而本插件按架构是**纯 DOM**。为了画三个字形就拉进 React 和一整条 primitives 依赖，
+等于拿掉这个插件的整个分层模型。
+
+所以字形是**逐路径照抄**的（`IconFullscreenOutlineArtwork`），用 `createElementNS` 建成普通 SVG，
+`currentColor` + `viewBox="0 0 16 16"` 就是它与样式表之间的全部契约。视觉上与旁边 DSH 自己的按钮一致，
+依赖上一条都没多。
 
 弹窗**不是**手写的 `position: fixed` 蒙层，而是 `showModal()` —— 浏览器把它提到
 **top layer**，这是唯一能绕开包含块的办法（`fixed` 元素是相对**最近创建包含块的祖先**
@@ -288,7 +308,7 @@ __DSH_VIEWER_KIT__.diagnose()
 
 ```powershell
 pnpm install
-pnpm run check        # 类型检查 → 构建 → 122 项测试 → 产物激活复现 → 宿主契约探针
+pnpm run check        # 类型检查 → 构建 → 125 项测试 → 产物激活复现 → 宿主契约探针
 pnpm run release      # check + 打包自检，完整发布门禁
 ```
 
@@ -338,11 +358,20 @@ Copy-Item lib\schema.js "$inst\lib\schema.js" -Force
 
 **这三样都是重装流程本身造成的，与插件无关。** 拷贝覆盖一条都不碰。
 
-> **但宿主半体（`lib/*.js`）不参与热换。** 客户端 bundle 有人盯，宿主模块已经被 ESM loader
-> 缓存进正在跑的进程，fiber 重启也只是重跑**旧**的 `apply`。所以改了 `lib/` 之后，
-> `Config` schema 和配置路由要**重启 DSH** 才生效。判断方法：
-> `cordis_inspect_query(Config.listConfigs, {name:"dsh-viewer-kit"})` 的 `status` 从
-> `absent` 变成有 schema，就说明宿主半体已经是新的了。
+> **但宿主半体（`lib/*.js`）不参与热换，这是设计而不是疏漏。** 原因是 `dsh-hmr` 的默认忽略
+> 清单里有 **`**/node_modules`**（`dsh-hmr/lib/index.js:241`，经 `picomatch` 应用在
+> `watcher` 的 `ignored` 上），而 `file:` 安装的插件正好住在 profile 的 `node_modules` 里 ——
+> 所以它的宿主模块**永远不会被监听**。客户端 bundle 走的是另一个包 `dsh-client-hmr`，
+> 它直接轮询 `clientModules.artifactBaseline()` 给的路径，没有忽略清单，因此能热换。
+>
+> 两条推论，值得记住：
+>
+> - **改客户端**：拷贝 + 刷新页面。
+> - **改宿主**：拷贝 + **重启 DSH**。fiber 重启没用 —— 模块已被 ESM loader 缓存进正在跑的
+>   进程，重启 fiber 只是重跑**旧**的 `apply`。
+>
+> 判断宿主换没换：`cordis_inspect_query(Config.listConfigs, {name:"dsh-viewer-kit"})` 的
+> `status` 从 `absent` 变成有 schema，就是新的了。
 
 `install_bundle` 在 lockfile 未变时会回 `Already up to date` 拒绝重装 —— 那是给"真要重装"用的，
 不在上面这条循环里。
@@ -413,7 +442,7 @@ src/client/
   renderers/           L5 渲染器：echarts / html / table
 src/index.js           Host 半体（仅作为 Loader 行的锚点）
 client/                ★ 构建产物，提交进库（见下）
-tests/                 122 项测试 + 探针负向测试 + DOM 垫片 + 从 DSH 真实产物抄来的夹具
+tests/                 125 项测试 + 探针负向测试 + DOM 垫片 + 从 DSH 真实产物抄来的夹具
 tools/                 宿主契约探针（读 app.asar）+ 发布前自检
 docs/                  架构设计 / 渲染器作者指南
 tsdown.config.ts       ★ 客户端 bundle 的构建契约（模块格式与 chunk 规则在这里定义）
@@ -424,7 +453,7 @@ tsdown.config.ts       ★ 客户端 bundle 的构建契约（模块格式与 ch
 > **构建产物是提交进版本库的**，这与"不提交产物"的常规做法相反，是有意的：本仓库就是被
 > `pnpm add file:<path>` 安装的那一份，而 DSH 激活时会直接 `readFileSync` 这个 bundle，
 > 缺文件会抛 `MissingClientBundleError` 并让 entry 激活失败。提交它们，新克隆的树才开箱可装
-> —— **这一条实测过：`git clone` 后不装任何依赖，122 项测试全绿。**
+> —— **这一条实测过：`git clone` 后不装任何依赖，125 项测试全绿。**
 > 改完源码务必重新 `pnpm run build` 再提交。
 
 > **tarball 只装必需的东西。** `package.json` 的 `files` 只有 `lib/ client/

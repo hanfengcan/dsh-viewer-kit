@@ -53,6 +53,13 @@ class ShimElement {
     this.style = {}
     /** @type {Map<string, Array<(event: { type: string }) => void>>} */
     this.listeners = new Map()
+    // Layout numbers a real browser computes, taken from the document's default
+    // so a test can describe the layout BEFORE the plugin mounts and asks.
+    // Zero is the honest default for a shim with no layout engine, and the
+    // plugin reads 0/0 as "nobody measured this" rather than as "it fits" — see
+    // `available()` in renderers/table.js.
+    this.scrollHeight = ownerDocument?.layout?.scrollHeight ?? 0
+    this.clientHeight = ownerDocument?.layout?.clientHeight ?? 0
   }
 
   // --- attributes ---------------------------------------------------------
@@ -455,6 +462,9 @@ function attachDialog(element, doc) {
 
 class ShimDocument {
   constructor() {
+    // Set before any element exists, because every element reads it.
+    // `mount()` overwrites it to describe a layout the plugin can react to.
+    this.layout = { scrollHeight: 0, clientHeight: 0 }
     // Initialised before any child is attached: `appendChild` records, and the
     // constructor itself appends.
     /** @type {Array<{ target: ShimElement, observer: ShimMutationObserver }>} */
@@ -485,6 +495,24 @@ class ShimDocument {
 
   createTextNode(data) {
     return new ShimText(data)
+  }
+
+  /**
+   * Same element type, plus the namespace the caller asked for.
+   *
+   * The enlarge control draws DSH's own SVG glyph, and `createElementNS` is the
+   * only way to build one — `createElement('svg')` yields an HTML element that
+   * no browser renders as a graphic. The shim does not model namespaces, so
+   * recording the argument is enough to assert the plugin asked for the SVG one
+   * rather than silently getting an inert element.
+   *
+   * @param {string | null} namespace
+   * @param {string} qualifiedName
+   */
+  createElementNS(namespace, qualifiedName) {
+    const element = new ShimElement(qualifiedName, this)
+    element.namespaceURI = namespace
+    return element
   }
 
   /**

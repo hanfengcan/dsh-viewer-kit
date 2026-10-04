@@ -89,6 +89,12 @@
  * @typedef {object} Expandable
  * @property {() => void} toggle
  * @property {() => boolean} isOn
+ * @property {() => boolean} [available] Whether enlarging would show anything
+ *   the current view does not. Omit it and the host always offers the control.
+ *   Implement it when the action is invisible for some content — a table
+ *   shorter than its own height cap has nothing to reveal, so the button would
+ *   be a no-op the reader has to click to discover. A renderer whose action
+ *   always changes the presentation meaningfully should NOT implement this.
  * @property {(listener: () => void) => (() => void)} [subscribe] Called after
  *   the state changes by any route other than the host's own button.
  */

@@ -177,6 +177,12 @@ const SWITCH_ATTRIBUTE = "data-dvk-switch";
 * @typedef {object} Expandable
 * @property {() => void} toggle
 * @property {() => boolean} isOn
+* @property {() => boolean} [available] Whether enlarging would show anything
+*   the current view does not. Omit it and the host always offers the control.
+*   Implement it when the action is invisible for some content — a table
+*   shorter than its own height cap has nothing to reveal, so the button would
+*   be a no-op the reader has to click to discover. A renderer whose action
+*   always changes the presentation meaningfully should NOT implement this.
 * @property {(listener: () => void) => (() => void)} [subscribe] Called after
 *   the state changes by any route other than the host's own button.
 */
@@ -345,6 +351,45 @@ function createRequest(input) {
 *
 * @module code-block-surface
 */
+const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
+/**
+* DSH's own fullscreen glyph, as plain DOM.
+*
+* Copied path-for-path from the shipped icon set —
+* `IconFullscreenOutlineArtwork` in
+* `@deepseek-ai/dsh-client-ui-primitives/lib/index.js` — so the control matches
+* the copy and branch icons DSH draws in the same banner instead of looking
+* imported from somewhere else.
+*
+* Copied rather than imported, deliberately: those icons are **React
+* components**, and this plugin is plain DOM by architecture. Pulling in React
+* and a primitives dependency to draw four glyphs would trade the plugin's
+* whole layer model for an SVG path. `currentColor` plus a 16x16 viewBox is the
+* entire contract between the artwork and the stylesheet.
+*
+* @param {Document} doc
+* @returns {Element}
+*/
+function expandIcon(doc) {
+	const svg = doc.createElementNS(SVG_NAMESPACE, "svg");
+	svg.setAttribute("width", "16");
+	svg.setAttribute("height", "16");
+	svg.setAttribute("viewBox", "0 0 16 16");
+	svg.setAttribute("fill", "none");
+	svg.setAttribute("aria-hidden", "true");
+	const filled = doc.createElementNS(SVG_NAMESPACE, "path");
+	filled.setAttribute("d", "M2.33154 9.40576V13.1685C2.3318 13.4444 2.55556 13.6685 2.83154 13.6685H6.49463V14.6685H2.83154C2.00328 14.6685 1.3318 13.9967 1.33154 13.1685V9.40576H2.33154ZM13.1685 1.33154C13.9964 1.33199 14.6683 2.00352 14.6685 2.83154V6.40576H13.6685V2.83154C13.6683 2.5558 13.4441 2.33199 13.1685 2.33154H9.49463V1.33154H13.1685Z");
+	filled.setAttribute("fill", "currentColor");
+	svg.appendChild(filled);
+	for (const d of ["M9.4292 6.57077L13.914 2.08594", "M6.57077 9.4292L2.08594 13.914"]) {
+		const line = doc.createElementNS(SVG_NAMESPACE, "path");
+		line.setAttribute("d", d);
+		line.setAttribute("stroke", "currentColor");
+		line.setAttribute("stroke-width", "1");
+		svg.appendChild(line);
+	}
+	return svg;
+}
 /**
 * @param {{
 *   root: Element,
@@ -448,8 +493,16 @@ function createCodeBlockSurface(options) {
 	let expandControl = null;
 	/** @type {(() => void) | null} */
 	let unsubscribeExpand = null;
+	/**
+	* Whether the current view is worth offering enlargement for.
+	*
+	* Decided once per `enter` and not re-read on a toggle: after the reader
+	* collapses a table it is capped again, so a live re-check would hide the one
+	* control that could expand it a second time.
+	*/
+	let expandOffered = false;
 	const syncExpandControl = (activeViewId) => {
-		const expandable = activeViewId === "code" ? void 0 : instance?.expand;
+		const expandable = activeViewId === "code" || !expandOffered ? void 0 : instance?.expand;
 		if (expandable === void 0 || typeof expandable.toggle !== "function") {
 			expandControl?.remove();
 			expandControl = null;
@@ -460,7 +513,10 @@ function createCodeBlockSurface(options) {
 			button.type = "button";
 			button.className = "dvk-expand";
 			button.setAttribute("data-dvk-action", "expand");
-			button.setAttribute("aria-pressed", "false");
+			button.setAttribute("aria-label", t("expand.label", "Enlarge"));
+			button.setAttribute("title", t("expand.label", "Enlarge"));
+			button.setAttribute("aria-expanded", "false");
+			button.appendChild(expandIcon(doc));
 			button.addEventListener("click", () => {
 				try {
 					instance?.expand?.toggle();
@@ -473,8 +529,7 @@ function createCodeBlockSurface(options) {
 			expandControl = button;
 		}
 		if (unsubscribeExpand === null && typeof expandable.subscribe === "function") unsubscribeExpand = expandable.subscribe(() => syncExpandControl(current));
-		expandControl.setAttribute("aria-pressed", String(instance?.expand?.isOn?.() === true));
-		expandControl.textContent = t("expand.label", "Enlarge");
+		expandControl.setAttribute("aria-expanded", String(instance?.expand?.isOn?.() === true));
 	};
 	let disposed = false;
 	let current = "";
@@ -515,6 +570,13 @@ function createCodeBlockSurface(options) {
  /** @type {Promise<void>} */ result.catch((error) => host.fail(error));
 		} catch (error) {
 			host.fail(error);
+		}
+		if (viewId === "code") expandOffered = false;
+		else try {
+			expandOffered = instance?.expand?.available?.() !== false;
+		} catch (error) {
+			host.fail(error);
+			expandOffered = true;
 		}
 		syncExpandControl(viewId);
 	}
@@ -2546,6 +2608,28 @@ function createTableRenderer(t) {
 					label: t("view.table", "Table")
 				}],
 				expand: {
+					/**
+					* Whether lifting the cap would reveal anything.
+					*
+					* This is the answer to a control that appeared to do nothing: a table
+					* shorter than `maxTableHeight` is never clipped, so removing a cap it
+					* never reached changes no pixel. With two or three rows the button is
+					* a no-op the reader has to click to discover.
+					*
+					* Answered from layout rather than from the row count, because the same
+					* number of rows is a different height in a different font and a cell
+					* can wrap. `scrollHeight > clientHeight` is the standard overflow test
+					* and it is exactly what "is this clipped" means.
+					*
+					* @returns {boolean}
+					*/
+					available() {
+						if (wrap === null) return false;
+						const content = Number(wrap.scrollHeight);
+						const box = Number(wrap.clientHeight);
+						if (!Number.isFinite(content) || !Number.isFinite(box) || content === 0 && box === 0) return true;
+						return content > box + 1;
+					},
 					toggle() {
 						expanded = !expanded;
 						applyCap();
@@ -2901,23 +2985,39 @@ const STYLES = `
 
 /* The enlarge control.
 
-   Deliberately NOT the switch's item class. That class is designed to sit
-   INSIDE a '.dvk-switch' container and reads as "one of the views"; reusing it
-   for a sibling action made the button inherit a pressed-pill look and be
-   mistaken for a selected view. This is a plain control: a thin border so it
-   reads as something pressable, and a hover tint as the affordance. */
+   An ICON button, matching the copy and branch controls DSH already draws in
+   this banner. The look is taken from the shipped CodeBlock module
+   (@deepseek-ai/dsh-client-ui-primitives/lib/markdown/CodeBlock.module.css,
+   its .copyButton rule): fully transparent, no border, no padding, and the
+   glyph is a 16x16 SVG filled with currentColor so it follows the banner's
+   text colour.
+
+   There is deliberately NO rule keyed on the button's own state, for two
+   independent reasons:
+
+     - A button that changes appearance when pressed was not wanted, and a state
+       rule is the only thing that could make it do so.
+     - A state rule and :hover have EQUAL specificity (a class plus one
+       qualifier each), so source order decides. A rule for
+       [aria-pressed='true'] sitting after :hover silently wins, and the hover
+       tint disappears — which is exactly what happened while this button
+       carried one.
+
+   The hover tint and the focus ring are the entire affordance: enough to read
+   as pressable without impersonating one of the view pills. */
 .dvk-expand {
   appearance: none;
-  border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.28));
-  margin: 0 0 0 4px;
-  padding: 0 8px;
-  height: 24px;
-  border-radius: var(--dsw-radius-sm, 6px);
-  font: 11px/18px var(--dsw-font-family, system-ui, sans-serif);
-  color: var(--dsw-alias-label-secondary, #666);
-  background: transparent;
+  border: none;
+  margin: 0 0 0 2px;
+  padding: 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: calc(var(--dsw-radius-sm, 6px) - 2px);
+  color: var(--dsw-alias-label-tertiary, #888);
+  background-color: rgb(255 255 255 / 0);
   cursor: pointer;
-  white-space: nowrap;
+  font: inherit;
 }
 .dvk-expand:hover {
   color: var(--dsw-alias-label-primary, #111);
@@ -2927,12 +3027,10 @@ const STYLES = `
   outline: 1px solid var(--dsw-alias-state-business-primary, #4a7dff);
   outline-offset: 1px;
 }
-/* Pressed is a tint, not the white pill the view switch uses — it must not
-   read as "this view is selected". */
-.dvk-expand[aria-pressed='true'] {
-  color: var(--dsw-alias-label-primary, #111);
-  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.16));
-  border-color: var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.4));
+/* Block, so the button's box is exactly the glyph plus its padding. An inline
+   SVG sits on a text baseline and adds descender space below it. */
+.dvk-expand > svg {
+  display: block;
 }
 
 /* Enlarged preview.

@@ -307,6 +307,10 @@ process.stdout.write('\nseam (fixture DOM)\n')
  */
 function mount(html, options = {}) {
   const env = createEnvironment()
+  // Before anything is scanned, so a renderer that inspects layout at mount time
+  // (the table's `available()`) sees the numbers the test intended. Setting them
+  // afterwards is too late — the surface has already asked.
+  if (options.layout !== undefined) env.document.layout = options.layout
   parseHtml(html, env.document.body)
   const kit = createKit({
     config: options.config,
@@ -767,16 +771,76 @@ await test('enlarging a table lifts the cap in place, and only for that table', 
   const wraps = env.document.querySelectorAll('.dvk-table-wrap')
   eq(wraps.length, 2, 'both blocks rendered a table')
   const buttons = env.document.querySelectorAll('[data-dvk-action="expand"]')
+  // The shim has no layout engine, so it reports 0/0 and the table's
+  // `available()` treats that as "not measured" and offers the control. The
+  // genuinely-short-table case is covered by its own test below.
   eq(buttons.length, 2, 'both blocks offer enlarge')
 
   click(buttons[0])
   eq(wraps[0].style.maxHeight, '', 'the first table is no longer capped')
   eq(wraps[1].style.maxHeight, '480px', 'the second table is untouched')
-  eq(buttons[0].getAttribute('aria-pressed'), 'true', 'the button reports the state')
+  eq(buttons[0].getAttribute('aria-expanded'), 'true', 'the button reports the state')
 
   click(buttons[0])
   eq(wraps[0].style.maxHeight, '480px', 'pressing again puts the cap back')
-  eq(buttons[0].getAttribute('aria-pressed'), 'false', 'and the button follows')
+  eq(buttons[0].getAttribute('aria-expanded'), 'false', 'and the button follows')
+})
+
+await test('a table that is not clipped offers no enlarge control', () => {
+  // The complaint this answers: the button appeared on every table and did
+  // nothing on a short one, because a table shorter than its cap is never
+  // clipped — removing the cap repaints no pixel. `layout` describes what the
+  // browser would compute, and it has to be set before mounting because the
+  // renderer is asked at mount time.
+  const table = createTableRenderer((_key, fallback) => fallback)
+  const rows = conversationFixture([
+    { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'csv', code: 'a,b\n1,2' }) },
+  ])
+
+  const fits = mount(rows, { renderers: [table], layout: { scrollHeight: 180, clientHeight: 180 } })
+  eq(expandButton(fits.env.document), null, 'a control that would do nothing is not drawn')
+
+  const clipped = mount(rows, { renderers: [table], layout: { scrollHeight: 900, clientHeight: 480 } })
+  assert(expandButton(clipped.env.document) !== null, 'an overflowing table gets the control')
+
+  // And a shim that reports nothing measured keeps offering it: guessing "yes"
+  // costs an unhelpful button, guessing "no" would hide the only way to see a
+  // clipped table.
+  const unmeasured = mount(rows, { renderers: [table] })
+  assert(expandButton(unmeasured.env.document) !== null, '0/0 reads as "not measured", not as "it fits"')
+})
+
+await test('the enlarge control is an icon from DSH own set, not a text button', () => {
+  // Matches the copy and branch buttons DSH draws in the same banner. The glyph
+  // is DSH's `IconFullscreenOutline` artwork, inlined rather than imported
+  // because the shipped icons are React components and this plugin is plain DOM.
+  const table = createTableRenderer((_key, fallback) => fallback)
+  const { env } = mount(conversationFixture([
+    { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'csv', code: tallCsv(400) }) },
+  ]), { renderers: [table] })
+
+  const button = expandButton(env.document)
+  const svg = button.querySelector('svg')
+  assert(svg !== null, 'the button draws an svg')
+  eq(svg.namespaceURI, 'http://www.w3.org/2000/svg', 'built in the SVG namespace, not as an inert HTML element')
+  eq(svg.getAttribute('viewBox'), '0 0 16 16', "DSH's icon grid")
+  eq(svg.getAttribute('aria-hidden'), 'true', 'decorative: the button already carries the name')
+  eq(button.textContent, '', 'no text label')
+  // An icon-only control must still be nameable.
+  eq(button.getAttribute('aria-label'), 'Enlarge', 'the accessible name')
+  eq(button.getAttribute('title'), 'Enlarge', 'and a hover title, the pair DSH sets')
+})
+
+await test('the enlarge control has no styling of its own for its state', async () => {
+  // A state rule and `:hover` have equal specificity, so whichever comes later
+  // wins. With `aria-expanded` synced and a rule keyed on it placed after the
+  // hover rule, the hover tint silently disappeared — reported from the real
+  // app as "hover 样式不见了". The fix is to own no state styling at all.
+  const { STYLES } = await import('../src/client/styles.js')
+  const expandBlock = STYLES.slice(STYLES.indexOf('.dvk-expand {'))
+  const rules = expandBlock.slice(0, expandBlock.indexOf('/* Enlarged preview'))
+  eq(/\.dvk-expand:hover/.test(rules), true, 'there is a hover rule')
+  eq(/\.dvk-expand\[aria-(pressed|expanded)/.test(rules), false, 'and no rule keyed on the state')
 })
 
 await test('a table remembers its enlarged state across a view switch', () => {
@@ -928,7 +992,7 @@ await test('closing the enlarged dialog with ESC clears the enlarge button', () 
   ]))
   const button = expandButton(env.document)
   click(button)
-  eq(button.getAttribute('aria-pressed'), 'true', 'pressed while the dialog is open')
+  eq(button.getAttribute('aria-expanded'), 'true', 'reported as expanded while the dialog is open')
 
   // The shim's `close()` is what the browser does on ESC and on a backdrop
   // click, and it fires the same `close` event the dialog listens for.
@@ -937,7 +1001,7 @@ await test('closing the enlarged dialog with ESC clears the enlarge button', () 
   dialog.close()
   eq(env.document.querySelector('dialog'), null, 'the dialog cleaned itself up')
   eq(env.document.openDialogs, 0, 'and the page is interactive again')
-  eq(button.getAttribute('aria-pressed'), 'false', 'the button stopped claiming to be pressed')
+  eq(button.getAttribute('aria-expanded'), 'false', 'and the button stopped claiming to be expanded')
 })
 
 await test('every enlarge string exists in both dictionaries', async () => {
@@ -960,14 +1024,19 @@ await test('every enlarge string exists in both dictionaries', async () => {
 })
 
 await test('a renderer with nothing to enlarge grows no control at all', () => {
-  // A button that does nothing is worse than no button.
+  // A button that does nothing is worse than no button. The built-in `code`
+  // view mounts nothing, so it has nothing to enlarge and must not offer.
   const { env } = mount(conversationFixture([
     { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) },
   ]))
+  assert(expandButton(env.document) !== null, 'offered on the preview view')
+
   click(switcher(env.document).children[1])
   eq(expandButton(env.document), null, 'no control while the source is showing')
-  assert(expandButton(env.document) === null || expandButton(env.document).getAttribute('aria-pressed') === 'false',
-    'and it never claims to be pressed')
+
+  click(switcher(env.document).children[0])
+  assert(expandButton(env.document) !== null, 'and it comes back with the preview')
+  eq(expandButton(env.document).getAttribute('aria-expanded'), 'false', 'reporting a closed state, not a stale one')
 })
 
 // ---------------------------------------------------------------------------

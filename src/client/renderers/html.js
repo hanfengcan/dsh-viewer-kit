@@ -497,6 +497,13 @@ export function createHtmlRenderer(t) {
         views: [{ id: 'preview', label: LANGS[request.lang] ?? 'Preview' }],
 
         expand: {
+          // Deliberately NO `available()`. The table implements one because a
+          // table shorter than its cap is not clipped, so lifting the cap paints
+          // no different pixel. Here the action always changes the presentation:
+          // a 320px frame becomes a dialog sized to the viewport, which is a
+          // different surface even for a document that already fitted. Gating on
+          // an estimated height would hide the control for exactly the short
+          // reports a reader most wants to see whole.
           toggle: () => {
             if (dialog === null) openDialog()
             else closeDialog()

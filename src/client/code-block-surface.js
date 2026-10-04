@@ -22,6 +22,55 @@
 import { BANNER_SELECTOR, CONTENT_SELECTOR, MODE_ATTRIBUTE, ROOT_ATTRIBUTE, SWITCH_ATTRIBUTE } from './dom-contract.js'
 import { normalizeLang } from './contract.js'
 
+const SVG_NAMESPACE = 'http://www.w3.org/2000/svg'
+
+/**
+ * DSH's own fullscreen glyph, as plain DOM.
+ *
+ * Copied path-for-path from the shipped icon set —
+ * `IconFullscreenOutlineArtwork` in
+ * `@deepseek-ai/dsh-client-ui-primitives/lib/index.js` — so the control matches
+ * the copy and branch icons DSH draws in the same banner instead of looking
+ * imported from somewhere else.
+ *
+ * Copied rather than imported, deliberately: those icons are **React
+ * components**, and this plugin is plain DOM by architecture. Pulling in React
+ * and a primitives dependency to draw four glyphs would trade the plugin's
+ * whole layer model for an SVG path. `currentColor` plus a 16x16 viewBox is the
+ * entire contract between the artwork and the stylesheet.
+ *
+ * @param {Document} doc
+ * @returns {Element}
+ */
+function expandIcon(doc) {
+  const svg = doc.createElementNS(SVG_NAMESPACE, 'svg')
+  svg.setAttribute('width', '16')
+  svg.setAttribute('height', '16')
+  svg.setAttribute('viewBox', '0 0 16 16')
+  svg.setAttribute('fill', 'none')
+  // The button already carries the accessible name; a second one inside it
+  // would be read out twice.
+  svg.setAttribute('aria-hidden', 'true')
+
+  const filled = doc.createElementNS(SVG_NAMESPACE, 'path')
+  filled.setAttribute(
+    'd',
+    'M2.33154 9.40576V13.1685C2.3318 13.4444 2.55556 13.6685 2.83154 13.6685H6.49463V14.6685H2.83154C2.00328 14.6685 1.3318 13.9967 1.33154 13.1685V9.40576H2.33154ZM13.1685 1.33154C13.9964 1.33199 14.6683 2.00352 14.6685 2.83154V6.40576H13.6685V2.83154C13.6683 2.5558 13.4441 2.33199 13.1685 2.33154H9.49463V1.33154H13.1685Z',
+  )
+  filled.setAttribute('fill', 'currentColor')
+  svg.appendChild(filled)
+
+  for (const d of ['M9.4292 6.57077L13.914 2.08594', 'M6.57077 9.4292L2.08594 13.914']) {
+    const line = doc.createElementNS(SVG_NAMESPACE, 'path')
+    line.setAttribute('d', d)
+    line.setAttribute('stroke', 'currentColor')
+    // The shipped artwork strokes at 1px for the "Regular" size.
+    line.setAttribute('stroke-width', '1')
+    svg.appendChild(line)
+  }
+  return svg
+}
+
 /**
  * @param {{
  *   root: Element,
@@ -150,23 +199,31 @@ export function createCodeBlockSurface(options) {
 
   // --- the expand button ----------------------------------------------------
   //
-  // A sibling of the switcher with its OWN class, not a third child borrowing
-  // `.dvk-switch__item`. That class is designed to sit inside the switch's
-  // container and reads as "one of the views"; reusing it made the action look
-  // like a selected view rather than a button.
+  // An icon button beside the view switch, matching the copy and branch controls
+  // DSH draws in the same banner. Its own class, never the switch's item class:
+  // that one is designed to sit inside the switch's container and reads as "one
+  // of the views".
   //
-  // It appears and disappears with `enter`, because whether enlarging makes
-  // sense depends on what is on screen: lifting a table's height cap is
-  // meaningless while its source is showing, and offering a button that does
-  // nothing is worse than not offering one.
+  // It appears and disappears with `enter` for two reasons: whether enlarging
+  // makes sense depends on what is on screen, and a renderer may report that it
+  // has nothing to enlarge — a table shorter than its own cap gains nothing from
+  // lifting it, and a button that does nothing is worse than no button.
   /** @type {HTMLElement | null} */
   let expandControl = null
   /** @type {(() => void) | null} */
   let unsubscribeExpand = null
+  /**
+   * Whether the current view is worth offering enlargement for.
+   *
+   * Decided once per `enter` and not re-read on a toggle: after the reader
+   * collapses a table it is capped again, so a live re-check would hide the one
+   * control that could expand it a second time.
+   */
+  let expandOffered = false
 
   const syncExpandControl = (activeViewId) => {
     // The built-in code view mounts nothing, so there is nothing to enlarge.
-    const expandable = activeViewId === 'code' ? undefined : instance?.expand
+    const expandable = activeViewId === 'code' || !expandOffered ? undefined : instance?.expand
     if (expandable === undefined || typeof expandable.toggle !== 'function') {
       expandControl?.remove()
       expandControl = null
@@ -177,7 +234,17 @@ export function createCodeBlockSurface(options) {
       button.type = 'button'
       button.className = 'dvk-expand'
       button.setAttribute('data-dvk-action', 'expand')
-      button.setAttribute('aria-pressed', 'false')
+      // An icon-only control carries no text, so the accessible name has to come
+      // from here — and `title` shows a sighted reader the same word on hover.
+      // DSH's own copy button sets exactly this pair.
+      button.setAttribute('aria-label', t('expand.label', 'Enlarge'))
+      button.setAttribute('title', t('expand.label', 'Enlarge'))
+      // `aria-expanded`, not `aria-pressed`: this is a disclosure that reveals an
+      // enlarged surface, not an on/off switch. It is reported to assistive tech
+      // and deliberately NOT styled — see the note in styles.js for why a state
+      // rule would silently kill the hover tint.
+      button.setAttribute('aria-expanded', 'false')
+      button.appendChild(expandIcon(doc))
       button.addEventListener('click', () => {
         try {
           instance?.expand?.toggle()
@@ -191,14 +258,12 @@ export function createCodeBlockSurface(options) {
     }
     // Subscribed once rather than per `enter`, because a modal dialog closes
     // itself — and while it is open it makes the page **inert**, so this button
-    // cannot be pressed again to correct its own state. Without the
-    // subscription the pressed styling sticks on forever after ESC or a
-    // backdrop click, describing a dialog that is already gone.
+    // cannot be pressed again to correct its own state. Without the subscription
+    // the reported state would be wrong forever after an ESC or backdrop click.
     if (unsubscribeExpand === null && typeof expandable.subscribe === 'function') {
       unsubscribeExpand = expandable.subscribe(() => syncExpandControl(current))
     }
-    expandControl.setAttribute('aria-pressed', String(instance?.expand?.isOn?.() === true))
-    expandControl.textContent = t('expand.label', 'Enlarge')
+    expandControl.setAttribute('aria-expanded', String(instance?.expand?.isOn?.() === true))
   }
 
   // --- state ----------------------------------------------------------------
@@ -252,7 +317,21 @@ export function createCodeBlockSurface(options) {
     } catch (error) {
       host.fail(error)
     }
-    // After `enter`, so `instance.expand` reflects the view that just mounted.
+    // After `enter`, so `instance.expand` reflects the view that just mounted and
+    // so a renderer can inspect what it actually laid out. `available` is
+    // optional and an absent one means "always offer it".
+    if (viewId === 'code') expandOffered = false
+    else {
+      try {
+        expandOffered = instance?.expand?.available?.() !== false
+      } catch (error) {
+        // A renderer that cannot answer must not lose the control: offering a
+        // button that turns out to be unhelpful is a smaller failure than
+        // hiding the only way to enlarge.
+        host.fail(error)
+        expandOffered = true
+      }
+    }
     syncExpandControl(viewId)
   }
 

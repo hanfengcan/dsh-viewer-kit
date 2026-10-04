@@ -327,6 +327,32 @@ export function createTableRenderer(t) {
         views: [{ id: 'table', label: t('view.table', 'Table') }],
 
         expand: {
+          /**
+           * Whether lifting the cap would reveal anything.
+           *
+           * This is the answer to a control that appeared to do nothing: a table
+           * shorter than `maxTableHeight` is never clipped, so removing a cap it
+           * never reached changes no pixel. With two or three rows the button is
+           * a no-op the reader has to click to discover.
+           *
+           * Answered from layout rather than from the row count, because the same
+           * number of rows is a different height in a different font and a cell
+           * can wrap. `scrollHeight > clientHeight` is the standard overflow test
+           * and it is exactly what "is this clipped" means.
+           *
+           * @returns {boolean}
+           */
+          available() {
+            if (wrap === null) return false
+            const content = Number(wrap.scrollHeight)
+            const box = Number(wrap.clientHeight)
+            // Both 0 means no layout engine answered — a DOM shim, or a host that
+            // has not laid the node out yet. Guessing "yes" is the safe
+            // direction: the worst case is one unhelpful button, where guessing
+            // "no" would remove the only way to see a clipped table.
+            if (!Number.isFinite(content) || !Number.isFinite(box) || (content === 0 && box === 0)) return true
+            return content > box + 1
+          },
           toggle() {
             expanded = !expanded
             // The wrap is cleared on every `enter`, so a toggle pressed while
