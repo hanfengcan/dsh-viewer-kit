@@ -35,11 +35,16 @@
 | `echarts` | `chartHeight` 360 | canvas 在 auto 高度盒子里渲染成 **0** 高 |
 | `table` | `maxTableHeight` 480 | **不是必须** —— 表格能自然撑开。封顶是为了不把对话拉长 |
 
-**每个被认领的块都带一个「放大」按钮，行为由渲染器自己决定：**
+**放大控件不是全局的 —— 只有提供 `expand` 的渲染器才有按钮，没提供的连控件都不长。**
+目前是 **html 预览**和**表格**两个，行为由渲染器自己决定：
 
 - **表格**：就地取消高度封顶，整张表在对话里展开。再点一次恢复。
 - **HTML 预览**：开一个 **`<dialog>` 弹窗**，高度按视口的 86% 算，内容按真实高度撑开。
   短文档无滚动条、无留白；长文档只在物理上装不下时才出现滚动条。
+
+**图表没有放大控件。** 图表有确定的 `chartHeight`，不存在"内容比框高"那种失控 ——
+封顶和逃生口这一对只在高度会失控的渲染器上才成立。要给图表加也可行（ECharts 有
+`resize()`，ResizeObserver 已经在看着了），但那是另一件事。
 
 弹窗**不是**手写的 `position: fixed` 蒙层，而是 `showModal()` —— 浏览器把它提到
 **top layer**，这是唯一能绕开包含块的办法（`fixed` 元素是相对**最近创建包含块的祖先**
@@ -306,12 +311,41 @@ fnm exec --using=24 -- pnpm run check     # 脚本/CI：不依赖 shell 配置
 ### 开发循环
 
 ```
-pnpm run build  →  重新安装  →  刷新页面
+pnpm run build  →  覆盖 profile 里那份  →  刷新页面
 ```
 
-pnpm 把 `file:` 目录依赖**拷贝**进 profile 的 `node_modules`（不是硬链接），所以光构建不重装，
-profile 里那份会停在安装那一刻的内容，**而且任何地方都不报错**。`install_bundle` 在 lockfile
-未变时会回 `Already up to date` 拒绝重装，需要先移除再安装。
+pnpm 把 `file:` 目录依赖**拷贝**进 profile 的 `node_modules`（不是硬链接），所以光构建不覆盖，
+profile 里那份会停在安装那一刻的内容，**而且任何地方都不报错**。
+
+**但"覆盖"不等于"重装"。** 用拷贝覆盖那几份产物就行，**不要走 `remove_bundle` + `install_bundle`**：
+
+```powershell
+$inst = "$env:USERPROFILE\.dsh\profiles\<profile>\node_modules\dsh-viewer-kit"
+Copy-Item client\client.js        "$inst\client\client.js" -Force
+Copy-Item lib\index.js  "$inst\lib\index.js"  -Force
+Copy-Item lib\schema.js "$inst\lib\schema.js" -Force
+```
+
+**为什么。** `@deepseek-ai/dsh-client-hmr` 每 **500ms**（`pollIntervalMs`）比对已安装 bundle 的
+`mtime / ctime / size`，一变就 `clientModules.rebuilt(id)` → 重组 boot 图 → SSE 推给浏览器。
+所以覆盖文件后**半秒内 DSH 自己就热换了**。而 `remove_bundle` 那条路会带来两个已知故障：
+
+| 现象 | 原因 |
+|---|---|
+| 顺带把 `dsh-schedule-later` 禁用了 | `remove_bundle` 的 bug，可复现 |
+| 重新启用时 `webserver: duplicate exact route` | 旧路由还没从表里摘掉，要重启 DSH |
+| `import failed (see console…)` | 边跑边装，图重组会让在途 import 失效 |
+
+**这三样都是重装流程本身造成的，与插件无关。** 拷贝覆盖一条都不碰。
+
+> **但宿主半体（`lib/*.js`）不参与热换。** 客户端 bundle 有人盯，宿主模块已经被 ESM loader
+> 缓存进正在跑的进程，fiber 重启也只是重跑**旧**的 `apply`。所以改了 `lib/` 之后，
+> `Config` schema 和配置路由要**重启 DSH** 才生效。判断方法：
+> `cordis_inspect_query(Config.listConfigs, {name:"dsh-viewer-kit"})` 的 `status` 从
+> `absent` 变成有 schema，就说明宿主半体已经是新的了。
+
+`install_bundle` 在 lockfile 未变时会回 `Already up to date` 拒绝重装 —— 那是给"真要重装"用的，
+不在上面这条循环里。
 
 ### 发布前自检
 
