@@ -46,7 +46,6 @@ const SAFETY_FACTOR = 1.15
  * that fits produce a scrollbar anyway: the frame comes out 16px short.
  */
 const BROWSER_BODY_MARGIN = 16
-const MAX_FRAME_FLOOR = 1600
 
 /** Block-level tags: each one starts a new visual line. */
 const BLOCK_TAG = /<\/?(?:p|div|section|article|header|footer|main|aside|nav|ul|ol|li|dl|dt|dd|table|thead|tbody|tfoot|tr|td|th|blockquote|pre|figure|figcaption|form|fieldset|h[1-6]|address)\b[^>]*>/gi

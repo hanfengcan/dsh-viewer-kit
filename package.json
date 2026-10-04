@@ -31,7 +31,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node tests/run.mjs",
     "repro": "node tests/repro-activation.mjs",
-    "check": "npm run typecheck && npm run build && npm test && npm run repro",
+    "probe": "node tools/probe-host.mjs",
+    "probe:test": "node tests/probe-host.mjs",
+    "check": "npm run typecheck && npm run build && npm test && npm run repro && npm run probe:test && npm run probe",
     "preflight": "node tools/preflight.mjs",
     "release": "npm run check && npm run preflight",
     "prepack": "npm run build"

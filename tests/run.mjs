@@ -197,6 +197,52 @@ await test('disabling a renderer and the master switch both stop negotiation', (
   eq(disabled.negotiate(request), null, 'per-renderer disable')
 })
 
+await test('disabling by renderer id re-offers the block; disabling by fence name does not', () => {
+  // Two renderers both claim a `json` block. The two tiers of
+  // `disabledRendererIds` must be distinguishable, and this is the case that
+  // tells them apart: a fence name that is not any renderer's id.
+  const block = createRequest({ surface: 'code-block', lang: 'json', source: '[{"a":1}]' })
+  const build = (ids) => {
+    const kit = createKit({ config: { disabledRendererIds: ids } })
+    kit.register(fakeRenderer('table', 5, () => true))
+    kit.register(fakeRenderer('echarts', 8, () => true))
+    return kit
+  }
+
+  eq(build(['table']).negotiate(block).id, 'echarts', 'id tier drops one claimant, the rest still bid')
+  eq(build(['echarts', 'table']).negotiate(block), null, 'both claimants gone: native code view, not a crash')
+  eq(build(['json']).negotiate(block), null, 'fence tier: no renderer is asked at all')
+  eq(build(['nothing-matches-this']).negotiate(block).id, 'echarts', 'an unrelated id disables nothing')
+})
+
+await test('resolveConfig refuses a chart height that would render nothing', () => {
+  // A canvas in a zero-height box draws nothing, and `typeof` cannot tell 0
+  // from 360 — so this key gets a value check. Each of these must be able to
+  // fail: if the check were removed, 0 and -1 would pass the type test.
+  eq(resolveConfig({ chartHeight: 500 }).chartHeight, 500, 'a real height is kept')
+  eq(resolveConfig({ chartHeight: 0 }).chartHeight, DEFAULT_CONFIG.chartHeight, 'zero falls back')
+  eq(resolveConfig({ chartHeight: -1 }).chartHeight, DEFAULT_CONFIG.chartHeight, 'negative falls back')
+  eq(resolveConfig({ chartHeight: Number.NaN }).chartHeight, DEFAULT_CONFIG.chartHeight, 'NaN falls back')
+  eq(resolveConfig({ chartHeight: Number.POSITIVE_INFINITY }).chartHeight, DEFAULT_CONFIG.chartHeight, 'infinite falls back')
+  eq(resolveConfig({ chartHeight: 'tall' }).chartHeight, DEFAULT_CONFIG.chartHeight, 'wrong type falls back')
+})
+
+await test('a renderer never re-declares a config default', () => {
+  // Two copies of one default is the defect: change one and the other goes
+  // stale silently. `kit.js` is the single place a resolved config is
+  // produced, so a renderer that needs a default must read it from there.
+  // These two identifiers were exactly that bug — a dead `MAX_FRAME_FLOOR`
+  // and a `DEFAULT_CHART_HEIGHT` whose `||` fallback resolveConfig made
+  // unreachable.
+  const rendererDir = join(ROOT, 'src', 'client', 'renderers')
+  for (const file of readdirSync(rendererDir)) {
+    const source = readFileSync(join(rendererDir, file), 'utf8')
+    for (const name of ['MAX_FRAME_FLOOR', 'DEFAULT_CHART_HEIGHT']) {
+      eq(source.includes(name), false, `${file} must not declare ${name}`)
+    }
+  }
+})
+
 await test('oversized sources are rejected before any renderer sees them', () => {
   const kit = createKit({ config: { maxSourceBytes: 10 } })
   let called = false

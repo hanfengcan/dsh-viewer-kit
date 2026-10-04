@@ -40,9 +40,6 @@ const LANGUAGES = new Set(['echarts', 'chart'])
 /** Ceiling on option size, so one pathological block cannot stall the tab. */
 const MAX_OPTION_CHARS = 512 * 1024
 
-/** Fallback chart height when the config does not say. */
-const DEFAULT_CHART_HEIGHT = 360
-
 /**
  * Parse the fence body as JSON.
  *
@@ -129,7 +126,10 @@ export function createEChartsRenderer(t) {
     create(host) {
       const { request, document: doc, mount, config } = host
       const parsed = parseOption(request.source)
-      const height = config().chartHeight || DEFAULT_CHART_HEIGHT
+      // `resolveConfig` is the only producer of a resolved chart height and it
+      // guarantees a usable one, so there is deliberately no fallback here: a
+      // second copy of the default is a second thing to forget to update.
+      const height = config().chartHeight
 
       // Survives every re-entry, so a toggle back to preview reuses the chart
       // rather than rebuilding it from a re-parsed option.

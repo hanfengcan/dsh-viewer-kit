@@ -15,6 +15,24 @@ import { createViewState } from './view-state.js'
 /** @type {Required<import('./contract.js').ViewerKitConfig>} */
 export const DEFAULT_CONFIG = Object.freeze({
   enabled: true,
+  /**
+   * Turn renderers off without uninstalling. One list, two tiers, and the
+   * difference is the whole reason it is easy to get wrong:
+   *
+   *   by RENDERER ID  — 'table', 'html', 'echarts'. That renderer stops
+   *                     matching. A block it used to claim is re-offered to the
+   *                     remaining renderers, and if none claims it the block
+   *                     falls back to the native code view.
+   *   by FENCE NAME   — 'csv', 'json', 'markdown', 'html'. No renderer sees
+   *                     such a block at all, whether or not a renderer exists
+   *                     for it.
+   *
+   * They overlap, so both `['csv']` and `['table']` switch off CSV tables, for
+   * different reasons: the first refuses the block, the second removes the
+   * claimant. They part company for a language no renderer is named after —
+   * `['json']` leaves every `json` block alone, which is the only way to keep
+   * an ECharts option out of the table renderer without naming `echarts`.
+   */
   disabledRendererIds: Object.freeze([]),
   maxSourceBytes: 256 * 1024,
   /**
@@ -86,6 +104,14 @@ export function resolveConfig(patch) {
       // An enum cannot be checked by `typeof`, which would accept any string and
       // leave the renderer comparing against a mode that does not exist.
       if (value === 'measure' || value === 'fit' || value === 'fixed') out[key] = value
+    } else if (key === 'chartHeight') {
+      // A canvas in a zero-height box draws nothing, and `typeof` cannot tell 0
+      // from 360. A height the reader cannot see is worse than the default, so
+      // this one key gets a value check instead of a type check. It is the only
+      // place that rule lives — the renderer reads the resolved value and adds
+      // no fallback of its own, because a second copy of the default is a
+      // second thing to forget when the default changes.
+      if (typeof value === 'number' && Number.isFinite(value) && value > 0) out[key] = value
     } else if (typeof value === typeof DEFAULT_CONFIG[key]) {
       out[key] = value
     }
@@ -179,11 +205,20 @@ export function createKit(options = {}) {
      */
     negotiate(request) {
       if (!config.enabled) return null
+      // Fence-name tier: a whole-request veto, so it runs before the cache and
+      // before any renderer's `match`. Correctness across a settings change
+      // comes from `setConfig` calling `invalidate()`, not from this position —
+      // which is here because refusing the block outright is the cheaper and
+      // clearer reading of the two tiers.
       if (config.disabledRendererIds.includes(request.lang)) return null
       const cached = negotiationCache.get(request.id)
       if (cached !== undefined) return cached === null ? null : (registry.get(cached) ?? null)
       let winner = null
       for (const renderer of sorted()) {
+        // Renderer-id tier: this renderer stops matching, and the block is
+        // re-offered to the rest. Falling off the end of the loop is the
+        // intended outcome, not a gap — the seam then leaves the native code
+        // view in place.
         if (config.disabledRendererIds.includes(renderer.id)) continue
         let claimed = false
         try {

@@ -945,8 +945,6 @@ function loadChunk(spec) {
 const LANGUAGES = /* @__PURE__ */ new Set(["echarts", "chart"]);
 /** Ceiling on option size, so one pathological block cannot stall the tab. */
 const MAX_OPTION_CHARS = 524288;
-/** Fallback chart height when the config does not say. */
-const DEFAULT_CHART_HEIGHT = 360;
 /**
 * Parse the fence body as JSON.
 *
@@ -1016,7 +1014,7 @@ function createEChartsRenderer(t) {
 		create(host) {
 			const { request, document: doc, mount, config } = host;
 			const parsed = parseOption(request.source);
-			const height = config().chartHeight || DEFAULT_CHART_HEIGHT;
+			const height = config().chartHeight;
 			/** @type {null | { setOption: (o: object) => void, resize: () => void, dispose: () => void }} */
 			let chart = null;
 			/** @type {null | { disconnect: () => void }} */
@@ -1503,6 +1501,24 @@ function createViewState(options = {}) {
 /** @type {Required<import('./contract.js').ViewerKitConfig>} */
 const DEFAULT_CONFIG = Object.freeze({
 	enabled: true,
+	/**
+	* Turn renderers off without uninstalling. One list, two tiers, and the
+	* difference is the whole reason it is easy to get wrong:
+	*
+	*   by RENDERER ID  — 'table', 'html', 'echarts'. That renderer stops
+	*                     matching. A block it used to claim is re-offered to the
+	*                     remaining renderers, and if none claims it the block
+	*                     falls back to the native code view.
+	*   by FENCE NAME   — 'csv', 'json', 'markdown', 'html'. No renderer sees
+	*                     such a block at all, whether or not a renderer exists
+	*                     for it.
+	*
+	* They overlap, so both `['csv']` and `['table']` switch off CSV tables, for
+	* different reasons: the first refuses the block, the second removes the
+	* claimant. They part company for a language no renderer is named after —
+	* `['json']` leaves every `json` block alone, which is the only way to keep
+	* an ECharts option out of the table renderer without naming `echarts`.
+	*/
 	disabledRendererIds: Object.freeze([]),
 	maxSourceBytes: 262144,
 	/**
@@ -1573,6 +1589,8 @@ function resolveConfig(patch) {
 		if (key === "disabledRendererIds") out[key] = Array.isArray(value) ? value.filter((id) => typeof id === "string") : [];
 		else if (key === "previewHeightMode") {
 			if (value === "measure" || value === "fit" || value === "fixed") out[key] = value;
+		} else if (key === "chartHeight") {
+			if (typeof value === "number" && Number.isFinite(value) && value > 0) out[key] = value;
 		} else if (typeof value === typeof DEFAULT_CONFIG[key]) out[key] = value;
 	}
 	return out;

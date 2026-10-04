@@ -193,9 +193,16 @@ __DSH_VIEWER_KIT__.diagnose()
 
 ```powershell
 pnpm install
-pnpm run check        # 类型检查 → 构建 → 94 项测试 → 产物激活复现
+pnpm run check        # 类型检查 → 构建 → 97 项测试 → 产物激活复现 → 宿主契约探针
 pnpm run release      # check + 打包自检，完整发布门禁
 ```
+
+`check` 的最后两步是**对着本机装的 DSH 查契约**。按需加载引擎 chunk 依赖三条没有公开文档的
+事实（chunk 文件名规则、`require.async`、缺失 bundle 的具名错误），它们一旦被 DSH 升级改掉，
+失败方式不是报错，而是图表静默不画。所以 `tools/probe-host.mjs` 直接读安装目录里的
+`app.asar`，把 `@deepseek-ai/dsh-client-modules` 的真实产物当事实来源；探针本身有
+`tests/probe-host.mjs` 九条负向测试，每条检查都有一个"改坏"的宿主能让它变红 —— 不然它就只是
+一串永远为真的输出。探针找不到 DSH 时 SKIP 而非通过。
 
 需要 **Node ≥ 22**（tsdown 用到 `Promise.withResolvers`）。仓库用 `.node-version` 声明 `24`，
 `package.json` 的 `engines.node` 兜底。**用版本管理器显式选定**，因为 `pnpm run` 是用
@@ -282,8 +289,8 @@ src/client/
   renderers/           L5 渲染器：echarts / html / table
 src/index.js           Host 半体（仅作为 Loader 行的锚点）
 client/                ★ 构建产物，提交进库（见下）
-tests/                 94 项测试 + DOM 垫片 + 从 DSH 真实产物抄来的夹具
-tools/                 asar 读取脚本 + 发布前自检
+tests/                 97 项测试 + 探针负向测试 + DOM 垫片 + 从 DSH 真实产物抄来的夹具
+tools/                 宿主契约探针（读 app.asar）+ 发布前自检
 docs/                  架构设计 / 渲染器作者指南
 tsdown.config.ts       ★ 客户端 bundle 的构建契约（模块格式与 chunk 规则在这里定义）
 ```
@@ -293,7 +300,7 @@ tsdown.config.ts       ★ 客户端 bundle 的构建契约（模块格式与 ch
 > **构建产物是提交进版本库的**，这与"不提交产物"的常规做法相反，是有意的：本仓库就是被
 > `pnpm add file:<path>` 安装的那一份，而 DSH 激活时会直接 `readFileSync` 这个 bundle，
 > 缺文件会抛 `MissingClientBundleError` 并让 entry 激活失败。提交它们，新克隆的树才开箱可装
-> —— **这一条实测过：`git clone` 后不装任何依赖，94 项测试全绿。**
+> —— **这一条实测过：`git clone` 后不装任何依赖，97 项测试全绿。**
 > 改完源码务必重新 `pnpm run build` 再提交。
 
 > **tarball 只装必需的东西。** `package.json` 的 `files` 只有 `lib/ client/

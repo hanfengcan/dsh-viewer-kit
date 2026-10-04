@@ -5,10 +5,16 @@
  * because a permissive stub is exactly how the first version of this plugin
  * passed its own tests and still crashed the product:
  *
- *   - `ctx` is a proxy. Only the documented members resolve; reading anything
- *     else throws, which is what a real cordis Context does and what the
- *     client builtin list means by "prefer `ctx.get(name)` with an undefined
- *     check".
+ *   - `ctx` is a proxy, and reading an absent member throws — which is what a
+ *     real cordis Context does. The harness is deliberately **narrower** than
+ *     the real client context, which mixes in 16 members (cordis
+ *     `reflect.ts:219-222`: get/set/provide/accessor/mixin, runtime/effect,
+ *     inject/plugin, and seven event verbs). It exposes only the four this
+ *     plugin is allowed to use, so anything else fails here rather than in the
+ *     product. Widening it to match cordis would delete the guard that caught
+ *     the `ctx.MutationObserver` crash; the cost is that the harness is a
+ *     floor, not a mirror, and a plugin that legitimately needs a fifth member
+ *     has to add it deliberately.
  *   - `ctx.effect(callback, label)` runs the callback **immediately** and takes
  *     its **return value** as the disposer — the pattern every shipped and
  *     community client plugin uses.
@@ -27,9 +33,6 @@ import { createEnvironment, parseHtml } from './dom-shim.mjs'
 
 /** BCP 47-ish tag check, lifted from the shipped locale registry. */
 const LOCALE_ID_PATTERN = /^[a-z]{2,3}(?:-[A-Z][a-z]{3})?(?:-[A-Z]{2}|-\d{3})?$/
-
-/** The documented `ctx` surface. Anything else must go through `get`. */
-const CTX_MEMBERS = new Set(['get', 'effect', 'on', 'provide', 'set', 'start', 'stop'])
 
 /**
  * The shipped locale registry, reduced to what a plugin touches.
