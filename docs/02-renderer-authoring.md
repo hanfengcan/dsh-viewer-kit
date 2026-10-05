@@ -1,28 +1,23 @@
 # 写一个新的渲染器
 
-> 这份文档面向"以后要往 kit 里加东西"的你。
 > 读完之后你应该能只新建 **一个文件**、加 **一行注册**，就得到一个新渲染器，
 > 而不需要读 `kit.js`、`dom-seam.js` 或 `code-block-surface.js`。
-
-> 这不是承诺，是已经发生过的事：`renderers/table.js` 是在 `html.js` 之后
-> 单独加进去的，当时内核与接缝一行都没改，也没有多写一个 DOM 夹具。
+> 前提是它是**自包含**渲染器——带引擎的另算，见 §10.1。
+> `tests/run.mjs` 的 "second renderer" 一节钉住了这个性质。
 
 > 改代码前先看 [AGENTS.md](../AGENTS.md) —— 房子规矩（尤其是 §4.1 注释怎么写）
-> 在那里。架构取舍见 [01-architecture.md](01-architecture.md)。
+> 在那里。架构分层与算法在 [01-architecture.md](01-architecture.md)；
+> 平台里**看起来是某样东西、实际不是**的事实在
+> [03-pitfalls.md](03-pitfalls.md)。
 
-> **但有一个前提，先说清楚：以上只对"自包含"渲染器成立。**
-> `renderers/echarts.js` 是第二个真实交付物，它需要**四处**改动（引擎 chunk、
-> 构建配置、可能还有 L1 的识别判据）。两档的完整对照见
-> [`docs/01-architecture.md` §4.6](01-architecture.md#46-两档渲染器这条主张的边界实测修正)。
->
-> 先回答"我要不要引入一个引擎库"：
+> **先回答"我要不要引入一个引擎库"：**
 >
 > | | 自包含 | 带引擎 |
 > |---|---|---|
 > | 例子 | `table`（自己解析 CSV/JSON） | `echarts`（1.4 MB 引擎） |
 > | 改动 | 本文件 + 1 行注册 | 本文件 + `chunks/` + `tsdown.config.ts` + 可能改 L1 |
 > | 包体 | 几 KB | 引擎独立成 chunk，按需 fetch |
-> | 围栏识别 | 语言名可靠（`csv`/`json`/`markdown` 都在 Shiki 表里） | **可能拿不到语言名，见第 3 节** |
+> | 围栏识别 | 语言名可靠（`csv`/`json`/`markdown` 都在 Shiki 表里） | **可能拿不到语言名，见 §2.1** |
 
 ---
 
@@ -33,13 +28,9 @@ src/client/renderers/<你的渲染器>.js     ← 新建，就这一个文件
 src/client/index.js 的 RENDERER_FACTORIES ← 加一行
 ```
 
-没了。没有新的 slot、没有新的 DOM 选择器、没有新的测试夹具。
+没有新的 slot、没有新的 DOM 选择器、没有新的测试夹具。
 
-（可选：实例上返回一个 `expand` 就能拿到放大控件，见 §8.5；它**不**要求改动上面任何一个文件。）
-
-`src/client/renderers/table.js` 就是这么来的——它是在 `html.js` 之后单独加进去的，
-当时 `kit.js` / `dom-seam.js` / `code-block-surface.js` / `contract.js` **一行都没动**。
-`tests/run.mjs` 里 "second renderer" 那一节就是用来钉住这个性质的。
+（可选：实例上返回一个 `expand` 就能拿到放大控件，见 §9；它**不**要求改动上面任何一个文件。）
 
 ---
 
@@ -114,17 +105,14 @@ const RENDERER_FACTORIES = [createHtmlRenderer, createTableRenderer, createMerma
 
 ### 2.1 `lang` 可能是空串，而这不是错误
 
-**这是本 kit 最容易踩的坑，值得单独一节。**
-
 DSH 的 `CodeToolbar` 渲染 `supportsHighlighting(lang) ? lang : <fallback>`，
-`supportsHighlighting` 查的是 Shiki 内置的 `LANG_ALIASES`——**不支持自定义围栏语言**。
-后果：
+`supportsHighlighting` 查的是 Shiki 内置的 `LANG_ALIASES`——**不支持自定义围栏语言**。后果：
 
-```
+````
 ```csv       → Shiki 认识 → banner 显示 "csv"      → lang = 'csv'
 ```markdown  → Shiki 认识 → banner 显示 "markdown" → lang = 'markdown'
 ```echarts   → Shiki 不认识 → banner 显示 "代码块"  → lang = ''
-```
+````
 
 围栏的真实名字**在 DOM 里根本不存在**，也没有 `data-lang` 之类的后备属性。
 所以 `lang` 为 `''` 有两种可能：围栏本来就没写语言，或者写了但 DSH 不认识。
@@ -139,20 +127,16 @@ match(request) {
 ```
 
 流式安全也是靠内容而不是定时器：**流式中的内容解析不了，判据自然不通过**，
-等补全的那次 mutation 到达就认领。不要靠"等一会儿"来区分。
+等补全的那次 mutation 到达就认领。不要靠"等一会儿"来区分。接缝那边为此有
+单独一条分支，见 [`01-architecture.md` §5.3](01-architecture.md)。
 
 `renderers/echarts.js` 的判据是"能 `JSON.parse` 成**非数组对象**且含**非空 `series` 数组**"。
 判据要**够特异**：太松会把别人的代码块抢过来，太紧则形同虚设。
 
-> `table` 之所以没暴露这个问题，纯属运气——它认领的 `csv` / `json` / `markdown`
-> 恰好都在 Shiki 表里。**下一个渲染器不一定会这么走运。**
-
 `lang` 的归一化规则（`contract.js` 的 `normalizeLang`）与 DSH 自己的取值方式一致：
 取 fence 串开头的 `/^[\w-]+/`，转小写，然后折叠别名（`htm`→`html`、`chart`→`echarts`、
 `tsv`→`csv`）。所以 ```` ```HTML title="x" ```` 拿到的 `lang` 就是 `html`。
-
-`match()` 里想用"原始语言名"就用 `rawLang(request.lang)` 的同类信息——
-不过实际上你几乎总是想要归一化后的 `request.lang`。
+需要原始串时用 `contract.js` 的 `rawLang()`，但你几乎总是想要归一化后的 `request.lang`。
 
 ---
 
@@ -270,7 +254,7 @@ match(request) {
 | 第三方库画的 canvas / SVG 图表 | **不需要**，但要确认该库不注入 `<script>` |
 | 模型的原始文本（HTML / SVG） | **必须**。照 `renderers/html.js` 抄：`sandbox` + `referrerpolicy` |
 
-沙箱的三条铁律（`docs/01-architecture.md` §8）：
+沙箱的三条铁律（[`01-architecture.md` §7](01-architecture.md)）：
 
 1. `allow-same-origin` 和 `allow-scripts` **永远不能同时出现**；
 2. 默认 `sandbox=""`，脚本要显式开配置项；
@@ -293,7 +277,7 @@ match(request) {
 
 ---
 
-## 8.5 放大控件（可选契约）
+## 9. 放大控件（可选契约）
 
 实例上多返回一个 `expand`，宿主就会在 banner 上放一个放大图标。
 **不返回就没有控件** —— 一个不实现任何东西的渲染器不该长一个按了没反应的按钮。
@@ -327,13 +311,12 @@ return {
 **弹窗要挂在 `document.body` 上，不要挂进块里。** 两条都是硬要求：`viewRoot` 每次切视图
 都会被清空，而会话是**虚拟化**的，块可能在弹窗还开着时就被回收。
 
-**样式上有一条容易踩的**：控件的**状态规则和 `:hover` 权重相同**，比的是书写顺序 ——
-状态规则写在 `:hover` 后面就会**静默吃掉** hover。所以这个控件**不要有任何状态样式**；
-真需要，用一个不会与 `:hover` 同权重的选择器。
+**样式**：控件不写任何状态样式——状态规则与 `:hover` 同权重时靠书写顺序决胜，
+把状态放在 `:hover` 之后会静默吃掉 hover（[03-pitfalls.md](03-pitfalls.md) §11）。
 
 ---
 
-## 9. 自测
+## 10. 自测
 
 渲染器本身是纯函数式的，接缝测试夹具已经现成可用：
 
@@ -364,7 +347,7 @@ pnpm test
 > 定义在 `tsdown.config.ts`。**自包含**渲染器不需要关心它——正常写 ESM 即可，
 > 相对 import、命名导出、`export const` 都支持。
 
-### 9.1 要引入引擎库时（带引擎渲染器）
+### 10.1 要引入引擎库时（带引擎渲染器）
 
 一个 1 MB 以上的库**不能**内联进入口 bundle：它会让每个用户、每次启动都付这个代价。
 本 kit 的做法是把它拆成独立文件、按需 fetch，用的**是 DSH 原生的 chunk 机制**，
@@ -397,7 +380,7 @@ define: { 'process.env.NODE_ENV': JSON.stringify('production') }
 
 ---
 
-## 10. 提交前自查
+## 11. 提交前自查
 
 **自包含渲染器：**
 

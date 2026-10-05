@@ -68,18 +68,15 @@ Copy-Item lib\*.js         "$inst\lib\"             -Force
 `pnpm add file:` 把依赖**拷贝**进 profile 的 `node_modules`（不是硬链接），所以光 `build`
 不会生效，profile 里那份停在安装那一刻，**而且任何地方都不报错**。
 
-**但不要为此走 `remove_bundle` + `install_bundle`。** 那条路必定带来三个故障，
-且**全部是流程本身造成的，与插件无关**：
+**但不要为此走 `remove_bundle` + `install_bundle`。** 那条路会顺带停掉别的 bundle，
+重新启用时又会撞上重复路由 —— `webServer.register` 对同一 `(kind, path)` 直接抛，
+旧路由没从表里摘掉就只能重启 DSH（这也是 `src/index.js` 把注册包进 effect 的理由）。
+**拷贝覆盖两个都碰不到。**
 
-| 现象 | 原因 |
-|---|---|
-| 顺带把 `dsh-schedule-later` 禁用了 | `remove_bundle` 的 bug，可复现 |
-| 重新启用时撞 `webserver: duplicate exact route` | 旧路由还没从表里摘掉，要重启 DSH |
-| `import failed (see console…)` | 边跑边装，图重组会让在途 import 失效 |
-
-**拷贝覆盖一条都不碰**，因为 `@deepseek-ai/dsh-client-hmr` 每 500ms（`pollIntervalMs`）
-比对已安装 bundle 的 `mtime / ctime / size`，一变就 `clientModules.rebuilt(id)` →
-重组 boot 图 → SSE 推给浏览器。
+拷贝之所以值得用，是因为它让产物落在已知位置、且改动即刻可见：
+`@deepseek-ai/dsh-client-hmr` 每 500ms（`pollIntervalMs`）比对已安装 bundle 的
+`mtime / ctime / size`，一变就 `clientModules.rebuilt(id)` → 重组 boot 图 →
+SSE 推给浏览器。
 
 > **`Copy-Item` 会保留源文件的 mtime。** 如果源比目标旧，HMR 可能看不出变化。
 > 拿不准就补一句 `(Get-Item $dst).LastWriteTime = Get-Date`。
@@ -143,8 +140,9 @@ fiber 重启也救不了：模块已被 ESM loader 缓存进正在跑的进程�
 // A state rule and :hover have equal specificity, so source order decides.
 ```
 
-**需要保留来龙去脉时**，不要塞进注释：写进 `docs/01-architecture.md`
-（它按 § 分节，注释里引 `docs/01-architecture.md §4.6` 就够），注释只留引用。
+**需要保留来龙去脉时**，不要塞进注释：机制写进 `docs/01-architecture.md`，
+平台里"看起来是某样东西、实际不是"的事实写进 `docs/03-pitfalls.md`。
+注释只留 `docs/01-architecture.md §1.1` 这样的引用。
 
 > 这条规则由**测试守着**：`tests/run.mjs` 里有一条用例扫描 `src/`、`tools/`、`scripts/`，
 > 命中 `the bug this fixes` / `reported from the real app` / `用户反馈` 之类字样即失败。
@@ -173,7 +171,7 @@ fiber 重启也救不了：模块已被 ESM loader 缓存进正在跑的进程�
 | 事 | 唯一来源 |
 |---|---|
 | 配置键的默认值、严格校验、宽松回落、patch 文档 | `src/schema.js` 的字段表 |
-| DSH DOM 契约（升级时**只**核对这里） | `src/client/dom-contract.js` |
+| DSH DOM 契约（升级时核对这两个文件） | `src/client/dom-contract.js` 与 `dom-seam.js` 的 `CONVERSATION_SELECTOR` |
 | 客户端 bundle 的模块格式与 chunk 规则 | `tsdown.config.ts` |
 | 客户端 / 宿主模块的加载与 on-demand chunk 契约 | `tools/probe-host.mjs`（读 app.asar） |
 
@@ -205,13 +203,16 @@ src/schema.js                ★ 配置的字段表（默认值 / 校验 / patch
 src/client/
   index.js                   入口：apply(ctx, config)
   contract.js                共享词汇：RenderRequest / Renderer / 配置 typedef
-  kit.js                     注册表 · 协商 · 视图状态 · 统计（零 DOM）
-  dom-contract.js            ★ DSH DOM 契约，升级时只核对这里
-  dom-seam.js                L1 发现 / 回收 / 作用域边界 / 流式守卫
+  kit.js                     注册表 · 协商 · 统计（零 DOM）
+  view-state.js              视图选择的持久化与订阅（零 DOM）
+  dom-contract.js            ★ DSH DOM 契约，升级时与 dom-seam.js 一起核对
+  dom-seam.js                L1 发现 / 回收 / 作用域边界 / 流式守卫；CONVERSATION_SELECTOR 在这里
   code-block-surface.js      L3 一个 surface = 一个代码块
   scroll-guard.js            认领块会改变它的高度；把由此产生的滚动位移抵消掉
   host-config.js             拉取宿主配置（带超时与回落）
   chunk-loader.js            按需加载引擎 chunk（走 DSH 原生 chunk 机制）
+  locale.js                  中英字典与 t() 回退；注册不由 ctx.effect 持有
+  styles.js                  自有样式表（data-plugin 标记，disposer 里移除）
   chunks/echarts.js          引擎本体，独立成文件，不进入口 bundle
   renderers/                 L5 渲染器：echarts / html / table
 src/tools/
@@ -219,8 +220,9 @@ src/tools/
 tests/                       159 项测试 + 探针负向测试 + DOM 垫片 + 从 DSH 产物抄来的夹具
 tools/probe-host.mjs         ★ 宿主契约探针（读 app.asar）
 tools/preflight.mjs          打包后自检
-docs/01-architecture.md      架构与取舍的完整记录（§ 引用它，别在注释里重述）
+docs/01-architecture.md      架构：分层、契约、算法判据（§ 引用它，别在注释里重述）
 docs/02-renderer-authoring.md 新增一个渲染器
+docs/03-pitfalls.md          平台里"看起来是某样东西、实际不是"的事实，与已排除的方案
 ```
 
 `tests/ scripts/ tools/ tsdown.config.ts` 是仓库内工作流，不进包。
@@ -248,9 +250,9 @@ pnpm run check      # 再看类型、夹具与断言
 ```
 
 1. `tools/asar-extract.ps1` 抽出新的 `CodeBlock` / `CodeCard.module.css` 与 shell 样式表
-   （`tools/README.md` 记了 asar 头部格式的坑：`DATA_BASE = 8 + headerSize`，
-   **不是** `16 + headerSize`，差 8 字节会让每个文件都读到前一个文件的尾巴）；
-2. 核对 `src/client/dom-contract.js` 里的 DOM 形状与行号 —— **只有这一个文件**需要改；
+   （用法见 `tools/README.md`；asar 头部格式见 `docs/03-pitfalls.md` §9）；
+2. 核对 `src/client/dom-contract.js` 里的 DOM 形状与行号，以及
+   `dom-seam.js` 里的 `CONVERSATION_SELECTOR` / `GENERIC_LABELS` —— 只有这两处需要改；
 3. `pnpm run check`；
 4. 拷贝覆盖产物（§3）。
 

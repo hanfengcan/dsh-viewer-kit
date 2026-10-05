@@ -1,1020 +1,630 @@
-# dsh-viewer-kit 架构设计
+# dsh-viewer-kit 架构
 
-> 目标：为 DeepSeek Harness（`dsh`）对话窗口提供**可插拔的内容渲染层**。
-> 当模型输出 HTML / 图表 / 数据表时，用户可以在「预览」与「代码」之间切换；
-> 未来新增渲染器（ECharts、数据表格、代码高亮、流程图……）**不需要改动内核和接缝代码**。
+本文按**已建成的代码**说明插件：每一层的职责、跨层契约、判据的表达式与常量值，
+以及每条宿主依赖的证据位置（DSH 发行包内文件 + 行号）。
+核对基线：`@deepseek-ai/dsh@0.2.0-rc.2`。
 
-本文档是实现之前的架构决策记录。文中所有平台事实都标注了可复核的证据位置
-（DSH 发行包内文件 + 行号）。核对基线：`@deepseek-ai/dsh@0.2.0-rc.2`。
-
-> **这是设计记录，不是使用说明。** 想用，看 [README](../README.md)；
-> 想改代码，先看 [AGENTS.md](../AGENTS.md) —— 命令、架构不变量、房子规矩都在那里。
-> 写新的渲染器，看 [02-renderer-authoring.md](02-renderer-authoring.md)。
+平台里**看起来是某样东西、实际不是**的事实，与已排除的方案，在
+[03-pitfalls.md](03-pitfalls.md)。写新渲染器的步骤与契约，在
+[02-renderer-authoring.md](02-renderer-authoring.md)。命令与房子规矩在
+[AGENTS.md](../AGENTS.md)。
 
 ---
 
-## 1. 目标与非目标
+## 1. 分层
 
-### 1.1 目标
+| 层 | 文件 | 职责 | 允许知道 |
+|---|---|---|---|
+| L5 渲染器 | `renderers/html.js` `table.js` `echarts.js` | 实现 `Renderer` | 只有 `RenderHost` 给的东西 |
+| L4 内核 | `kit.js` `contract.js` `view-state.js` | 注册表 · 协商 · 视图状态 · 统计 | **零 DOM**，可在纯 Node 下测 |
+| L3 宿主表面 | `code-block-surface.js` | 一个 surface = 一个代码块 | DSH 的 content / banner 节点 |
+| L1 接缝 | `dom-seam.js` | 发现 · 回收 · 认领门 · 生命周期 | DSH 的 DOM 形状 |
+| — 滚动 | `scroll-guard.js` | 抵消认领造成的高度位移 | 一个元素 + 其祖先 |
+| 宿主半体 | `src/index.js` `src/schema.js` `src/tools/` | 配置校验与发布 · 原型模式 | Node 侧，不碰 DOM |
 
-| # | 目标 | 验收标准 |
+依赖严格向下：L5 只能看见 L4 暴露的接口，L4 不知道 DOM 存在，
+L1/L3 不知道有哪些渲染器。
+
+**`RenderRequest` 在 L3 构造**（`code-block-surface.js:102` 调 `kit.buildRequest`）。
+L1 只读 DOM，把 `root` / `source` / `lang` / `info` / `scope` 往下传，
+自己不构造请求对象。
+
+### 1.1 加一个渲染器的成本，两档
+
+| | 自包含（`table`） | 带引擎（`echarts`） |
 |---|---|---|
-| G1 | HTML 代码块支持「预览 / 代码」切换 | 会话里出现 ` ```html ` 围栏时，代码块头部出现切换按钮，两种视图都能正常显示 |
-| G2 | 渲染器可渐进添加 | **自包含**渲染器：新增 1 个文件 + 1 行注册，不修改 `core/` 与 `seam/` 任何代码。**带引擎**的渲染器见 §4.6 —— 还需要构建契约，这条主张对它是两档而非一档 |
-| G3 | 零破坏性 | 不注册任何 DSH 已占用的 Slot；不重写 DSH 自带的组件；卸载插件后对话窗口完全复原 |
-| G4 | 失败可降级 | 渲染器抛错、加载失败、内容超限，都退化为「原生代码块 + 一个提示」，会话不白屏 |
-| G5 | 安全 | 模型产出的 HTML 在**不与宿主同源**的沙箱中渲染，默认禁用脚本 |
-| G6 | 跟随宿主外观 | 只使用 `--dsw-*` 主题变量，明暗主题自动跟随 |
-
-### 1.2 非目标（v0 明确不做）
-
-- **不做** ECharts / 表格 / Mermaid 的具体实现。它们是 G2 的验收样例，不是 v0 的交付物。
-- **不做** 对话窗口的整体接管（不注册 `conversation.chat.node` 的任何 key）。理由见 §3.2。
-- **不做** 服务端渲染 / 导出。所有渲染发生在浏览器端。
-- **不做** 修改模型行为（不注入 system prompt）。v0 完全被动：模型照常输出围栏代码块。
-
----
-
-## 2. 平台事实核查
-
-设计前先确认「平台到底提供了什么」，避免基于猜测设计。以下结论均可复核。
-
-### 2.1 插件打包与加载
-
-| 事实 | 证据 |
-|---|---|
-| 客户端插件在 `package.json` 声明 `dsh.client` | `dsh-client-ui-renderer/package.json:32-37` |
-| 客户端半体导出 `./client`，产物是 `client/client.js` | `dshmarket/package.json:69`（社区插件实证） |
-| 产物格式为 `window.__ModuleLoader__.load({ id, factory })`，factory 内的 `require` 解析基线模块表 | `dshmarket/client/client.js:1`、`dsh-experimental-client-ui-voice-input/lib/client.js:1-3` |
-| 客户端半体导出 `apply(ctx)`；`ctx.effect` / `ctx.get` / `ctx.on` 可用 | `Builtin` 检查器返回的客户端内置符号 |
-| Bundle 通过 `dsh.bundle.patch` 指向一个 `cordis.patch.yml`，以 `insert` 行挂进 profile | `dshmarket/cordis.patch.yml:2-4` |
-| 插件卸载会连带清理其插入的样式 | `dsh-client-modules/README.md:42` |
-| 标准客户端 bundle 由 **tsdown** 产出（官方与社区插件一致） | `dshmarket/package.json:26` (`build:client": "tsdown && …"`)、voice-input 同构 |
-
-**推论 1**：本插件可以是一个**零运行时依赖、零 React** 的纯浏览器插件。
-它不使用任何基线模块，所以产物里的 `require` 一次都不会被调用。
-
-**推论 2**：构建走标准 tsdown 管线，而不是自研打包器。格式契约集中定义在
-`tsdown.config.ts` 一处：`format: 'cjs'`（DSH 消费的不是 ESM）+ banner 里的
-`window.__ModuleLoader__.load({ id, factory })` 外壳 + factory 内自建
-`module` / `exports` 对（rolldown 的 CJS interop 前导假定它们已存在）。
-`entryFileNames: '[name].js'` 把 tsdown 默认的 `client.cjs` 拉回 DSH 约定的
-`client/client.js`。
-
-### 2.2 Slot 系统（我们**不用**它，但必须知道它的边界）
-
-| 事实 | 证据 |
-|---|---|
-| Slot 有 4 种：`single` / `list` / `keyed` / `chain` | `dsh-client-ui-slots/lib/index.js:163-190` |
-| `keyed` / `list` / `single` 支持 `priority`，**低优先级即"遮蔽"**，同 key 同优先级重复注册会抛错 | 同上 `:168-186`，提示语原文：`register at a different priority to shadow it (lowest renders)` |
-| 「声明即拥有」：子 slot 只有声明方能注册 | `dsh-client-ui-slots/README.md:46` |
-| `conversation.chat.node` 是 `keyed`，key 域固定为 `ChatNodeKind`，`assistant-step` 已被占用 | Slot 实时检查器输出 |
-
-**推论**：技术上**可以**用 `priority: -1` 遮蔽 `assistant-step`，但那样我们就得重写整个助手消息视图（见 §3.2）。
-
-### 2.3 Markdown 渲染管线（关键）
-
-助手消息正文的渲染路径是：
-
-```
-conversation.chat.node[key="assistant-step"]   →  AssistantNodeView
-  └─ AssistantMarkdown
-       └─ 每个 text block → MarkdownText          (primitives)
-            └─ renderNode: case "code" → renderCode → <CodeBlock>
-```
-
-关键事实：
-
-| 事实 | 证据 |
-|---|---|
-| `MarkdownText` 是一条**封闭**的自研 mdast→React 渲染器（不是 react-markdown），外部无法注入节点渲染 | `dsh-client-ui-primitives/lib/index.js:11168-11185` |
-| 全文唯一可扩展的上下文是 `MarkdownDelegateContext`，它**只管链接跳转**（`openExternalLink` / `openFile` / `fileImages`），不涉及渲染 | 同上 `:11031-11061` |
-| 围栏代码块渲染出的 DOM 带有**稳定、且被官方 CSS 注释称为"稳定内容节点"的钩子** | 见下表 |
-
-`CodeBlock` 实际输出的 DOM 契约（`primitives/lib/index.js:10873-10914`）：
-
-```html
-<div class="…block md-code-block" data-code-wrap="true">
-  <div class="…bannerWrap">
-    <div class="…header" data-code-block-banner>      <!-- CodeToolbar -->
-      <div class="…heading"><span class="…language">html</span></div>
-      <div class="…actions">[wrap 按钮][copy 按钮]</div>
-    </div>
-  </div>
-  <div class="…content" data-code-block-content>        <!-- ← 官方注释：stable content node -->
-    <div class="shiki"><pre class="shiki css-variables">…</pre></div>
-  </div>
-</div>
-```
-
-其中官方 CSS 的原文注释是关键证据：
-
-> `/* Consumers may turn the stable content node into a viewport without changing
->    the default CodeBlock layout. */`
-> —— `dsh-client-ui-primitives/lib/markdown/CodeBlock.module.css:73-76`
-
-即：**DSH 自己就声明了这个节点是给外部消费者用的**。
-
-另外两条对我们非常重要：
-
-1. **语言名只出现在 banner 的文本里**，没有 `data-lang` 属性。→ 接缝必须从
-   `[data-code-block-banner]` 的第一个 `span` 读取语言名。
-2. **稳定态与流式态的 DOM 形态不同**：
-   - 流式中：内容节点的子元素**就是** `<pre class="shiki">`；
-   - 稳定后（已高亮）：子元素是 `<div class="shiki">`，`pre` 在 div 里面。
-
-   这个差异天然就是"是否已结束流式输出"的判据，无需任何定时器（见 §6.3）。
-
----
-
-## 3. 接入点选型：三条路，只有一条值得走
-
-### 3.1 方案 A：遮蔽 `conversation.chat.node[assistant-step]`，自己重写助手消息
-
-- 做法：`ctx.slots.register({name:'conversation.chat.node', key:'assistant-step', priority:-1}, MyView)`。
-- 代价：必须重新实现 `AssistantMarkdown` 的**全部**行为——正文、思维链折叠行、图片分组、
-  turn-process 内联、停止徽标、actions 行，以及 `conversation.chat.turnTail` /
-  `conversation.chat.assistant-actions` 两个子 slot 的透传渲染，还有流式 shimmer 与
-  presentation 策略。
-- 风险：DSH 每次升级都可能改这块行为，我们跟一次坏一次；且没有"回退到官方实现"的手段
-  （被遮蔽的 occupant 不对消费者暴露，`ctx.slots` 只有 `register` / `registerFactory` / `inject`）。
-- 结论：**否决**。收益（一个围栏的切换按钮）远小于风险。
-
-### 3.2 方案 B：新增一个 `viewer_render` 工具，让模型主动调用
-
-- 做法：Host 半体注册一个工具 + 客户端注册 `tool.call.toolview[viewer_render]`（该 slot 的
-  key 域是开放的，不遮蔽任何东西）。
-- 优点：纯增量、零 DOM 操作、架构最干净。
-- 缺点：**改变了内容形态**。模型必须"调用工具"而不是"输出围栏"，需要改 system prompt，
-  且大段 HTML 塞进工具参数既费 token 又难续流。
-- 结论：**保留，但降级为 v1 的第二条内容来源**（§7）。它对"结构化数据"（图表 spec、大表）
-  仍然是对的形式，只是不能作为 HTML 预览的主路径。
-
-### 3.3 方案 C（采纳）：把 `[data-code-block-content]` 当作**视口**，在其旁边挂载我们自己的渲染结果
-
-- 做法：不碰 DSH 的组件与 Slot，只在它已经声明为"稳定内容节点"的位置挂载自己的 DOM。
-- 优点：
-  - **零遮蔽**、零重写、零 React 依赖；
-  - 对 DSH 升级的耐受度高——只要那个 `data-code-block-content` 钩子还在，接缝就还能工作；
-  - 与「内容从哪来」解耦，将来接工具来源、接文件预览，都不用改接缝。
-- 代价：需要小心地与 React 的 reconciliation 共存。这部分被完整收敛到**一个文件**
-  （`src/client/code-block-surface.js`），并写成显式不变量（§6.4）。
-- 结论：**采纳**。核心架构建立在"接缝适配器"接口之上，接缝实现可替换（§9 迁移路径）。
-
----
-
-## 4. 架构分层
-
-```
-┌───────────────────────────────────────────────────────────────────────┐
-│ L5  Renderer        renderers/html.js  ·  renderers/echarts.js  ·  …   │  ← 插件作者的日常战场
-│     实现 Renderer 契约；不 import 任何 L1-L4 的内部实现                  │
-├───────────────────────────────────────────────────────────────────────┤
-│ L4  Kit Core        kit.js  ·  view-state.js  ·  contract.js          │  ← 零 DOM、零 React、可单测
-│     注册表 · 协商算法 · 视图状态 · 标识符与语言归一化                     │
-├───────────────────────────────────────────────────────────────────────┤
-│ L3  Host Surface    code-block-surface.js                             │  ← 内容宿主（视口）
-│     一个 surface = 一个代码块；负责开关控件 + 挂载渲染器实例              │
-├───────────────────────────────────────────────────────────────────────┤
-│ L2  Source          由 L1 产出的 RenderRequest 流                      │  ← 内容来源抽象
-│     v0: 围栏代码块    v1: 工具调用结果                                  │
-├───────────────────────────────────────────────────────────────────────┤
-│ L1  Seam Adapter    dom-seam.js                                        │  ← 唯一与 DSH DOM 耦合的层
-│     发现 / 回收 surface；流式守卫；生命周期                              │
-└───────────────────────────────────────────────────────────────────────┘
-```
-
-**依赖方向严格向下**。L5 只能看到 L4 暴露的接口；L4 不知道 DOM 存在；L1/L3 不知道
-具体有哪些渲染器。因此：
-
-- 加一个**自包含**渲染器 → 只碰 L5（+ 一行注册）。
-- 加一个**带引擎**的渲染器 → 还碰构建契约与 L1 的识别判据，清单见 §4.6。
-- 换掉接缝（比如将来 DSH 提供了真正的渲染扩展点）→ 只碰 L1/L3，L4/L5 零改动。
-
-### 4.6 两档渲染器：这条主张的边界（实测修正）
-
-架构原本的主张是"加渲染器 = 一个文件 + 一行"。**这对 `table` 成立，对 `echarts` 不成立**，
-而两个都是真实交付物，所以主张必须写成两档，而不是留一个已知不准的承诺。
-
-| | 自包含渲染器（`table`、将来的 Mermaid） | 带引擎渲染器（`echarts`） |
-|---|---|---|
-| 新增文件 | `renderers/x.js` | `renderers/x.js` + `chunks/x.js` + `chunk-loader.js`（一次） |
+| 新增文件 | `renderers/x.js` | `renderers/x.js` + `chunks/x.js` + `chunk-loader.js` |
 | `index.js` 注册 | 1 行 | 1 行 |
-| `tsdown.config.ts` | 不动 | 第二个 entry + 逐 chunk 的 `banner` + 可能需要的 `define` |
-| L1 接缝 | 不动 | **可能必须动** —— 见下 |
-| 包体 | 几 KB | 引擎独立成文件，按需 fetch |
-
-**为什么 L1 可能必须动（这一条最值钱）**：DSH 的 `CodeToolbar` 渲染
-`supportsHighlighting(lang) ? lang : <fallback>`，而 `LANG_ALIASES` 是 Shiki 内置表、
-**不支持自定义**。所以 ` ```echarts ` 的 banner 上写的是"代码块"，**原始语言名在 DOM 里
-根本不存在**（也没有 `data-lang` 之类的后备）。
-
-`table` 之所以没暴露这个问题，是因为它认领的 `csv` / `json` / `markdown` **都在 Shiki 表里**，
-banner 会显示真名。**任何 Shiki 不认识的围栏语言，语言名都拿不到。**
-
-修法是让识别**不依赖语言名**：通用标签 → 语言置空 → 由渲染器按内容认领。
-流式安全不靠定时器猜 —— 流式中的 JSON 解析不了，内容判据自然不通过，等补全的那次
-mutation 到达即被认领。**改动在 L1，所以它不属于"只碰 L5"。**
-
-> 写这条修正的直接原因：我自己就是先按"一个文件 + 一行"写的文档，再写 `echarts`，
-> 然后发现要动四处。**文档承诺的范围一旦大于实际，后来者会按错误的成本估算动手。**
+| `tsdown.config.ts` | 不动 | 第二个 entry + 逐 chunk 的 `banner` + `define` |
+| L1 识别判据 | 不动 | **可能必须动** —— 见 §5.4 |
 
 ---
 
-## 5. 核心契约
+## 2. 宿主契约
 
-### 5.1 `RenderRequest` — 被归一化的"一段可渲染内容"
+本插件依赖 DSH 若干**没有公开文档**的行为。凡在 `tools/probe-host.mjs`
+覆盖范围内的，本文在条目上标「探针守着」。
 
-```ts
-interface RenderRequest {
-  /** 稳定标识：同一段内容在重渲染/滚动回来后仍是同一个 id（用于记忆视图状态）。 */
-  id: string
-  /** 来源表面种类，当前仅 'code-block'；为将来的 'tool-call' / 'document' 预留。 */
-  surface: 'code-block' | 'tool-call' | 'document'
-  /** 归一化后的语言标识（小写、去首尾空白）；无语言时为 ''。 */
-  lang: string
-  /** 原始文本，未做任何裁剪或转义。 */
-  source: string
-  /** 供渲染器自行判断的附加信息（如 fence 上是否存在 meta 串）。 */
-  meta?: { info?: string }
-}
-```
-
-### 5.2 `Renderer` — 渲染器契约
-
-```ts
-interface Renderer {
-  /** 全局唯一 id，也是优先级相同时的确定性排序键。 */
-  id: string
-  /** 展示名（工具栏下拉、错误提示用）。 */
-  label?: string
-  /** 数值越大越优先。默认 0。 */
-  priority?: number
-  /**
-   * 认领判定。返回 true 表示"我来渲染"。
-   * 可以只看 lang，也可以解析 source 做内容嗅探（例如 JSON 数组 → 表格）。
-   * 必须便宜且无副作用。
-   */
-  match(request: RenderRequest): boolean
-  /**
-   * 创建渲染实例。返回 null 表示"现在不渲染"（例如内容超限），
-   * 此时该 surface 保持原生外观，不显示开关。
-   */
-  create(host: RenderHost): RendererInstance | null
-}
-
-interface RenderHost {
-  request: RenderRequest
-  /** 建节点用的 document。 */
-  document: Document
-  /** 挂到 surface 自己的视图容器里。每次 enter 前该容器已被清空，
-   *  所以渲染器不需要管理自己的容器。 */
-  mount(node: Node): void
-  /** 清空视图容器。 */
-  clearView(): void
-  /** 供渲染器遵守的尺寸上限。全部来自用户配置，渲染器不得自定阈值。 */
-  limits: { maxSourceBytes: number; maxPreviewHeight: number; maxTableHeight: number }
-  /** 渲染器内抛错时调用：外壳降级为原生代码块并提示。 */
-  fail(error: unknown): void
-  /** 读取当前配置（只读快照）。 */
-  config(): ViewerKitConfig
-}
-
-interface RendererInstance {
-  /** 本渲染器支持的视图，如 ['preview','code']；至少一个。 */
-  views: ViewDescriptor[]
-  /** 进入某个视图。宿主已保证同一实例上 'code' 视图永远可用。 */
-  enter(viewId: string): void | Promise<void>
-  /** 离开实例（宿主即将卸载）。释放 iframe、定时器、观察器。 */
-  dispose(): void
-  /**
-   * 可选。实现了它，宿主才会在 banner 上放放大控件；不实现则一个控件都不长。
-   * 四个成员各自解决一个具体问题，见下方说明。
-   */
-  expand?: Expandable
-}
-
-/**
- * 放大契约。宿主只需要三件事 + 一个订阅：画不画按钮、按下去做什么、
- * 现在是什么状态、以及**状态被别的途径改变时**的通知。
- */
-interface Expandable {
-  toggle(): void
-  isOn(): boolean
-  /**
-   * 可选。状态被宿主按钮以外的途径改变时通知宿主。
-   * 弹窗型实现**必须**有：showModal() 让整页 inert，控件开着的这段时间里
-   * 按钮按不到第二次，读者用 ESC 或点背景离开 —— 没有这个通知，
-   * 按钮报告的状态会永久停在"已展开"。
-   */
-  subscribe?(listener: () => void): () => void
-  /**
-   * 可选。"放大能看到现在看不到的东西吗"。
-   * **只在放大对某些内容毫无变化时才实现** —— 比如比自身高度上限矮的表格
-   * 根本没被裁，取消封顶一个像素都不会变。不实现 = 永远提供控件。
-   */
-  available?(): boolean
-}
-
-interface ViewDescriptor {
-  id: string
-  label: string
-}
-```
-
-**为什么 `match` 与 `create` 分开**：`match` 是纯判定，宿主可以缓存；`create` 有副作用
-（建 iframe、起定时器），只在真正需要时才调用，且必须可失败。
-
-**为什么宿主保证 `'code'` 视图总可用**：切换回代码时，最安全、最省资源的做法是
-**把原生 `<pre>` 原封不动地显示回来**——不做二次渲染，零失真。渲染器只需要实现 `preview`。
-
-### 5.3 `Kit` — 门面（L4 对外唯一 API）
-
-```ts
-interface Kit {
-  /** 注册一个渲染器，返回注销函数。重复 id 直接抛错（配置错误应当早失败）。 */
-  register(renderer: Renderer): () => void
-  /** 已注册渲染器的只读快照（按优先级降序）。 */
-  renderers(): readonly Renderer[]
-  /** 协商：返回优先级最高、且 match 为真的渲染器。无匹配返回 null。结果按内容 id 缓存。 */
-  negotiate(request: RenderRequest): Renderer | null
-  /** 视图状态：读 / 写 / 订阅。 */
-  getView(id: string): string | undefined
-  setView(id: string, viewId: string): void
-  subscribe(listener: () => void): () => void
-  /** 首次见到的一段内容默认打开哪个视图。 */
-  defaultView(): string
-  /** 构造 RenderRequest 的唯一入口，保证 id 与各字段不会走偏。 */
-  buildRequest(input): RenderRequest
-  /** 尺寸闸门：在任何渲染器看到内容之前拒绝超限内容。 */
-  withinLimits(request: RenderRequest): boolean
-  /** 绑定到一个具体挂载点，得到交给渲染器的 RenderHost。 */
-  hostFor(request, fail, surface): RenderHost
-  /** 构造实例；任何失败都转成 null，让调用方落回原生代码块。 */
-  instantiate(renderer, request, host): RendererInstance | null
-  /** 该实例的视图清单 = 渲染器自己的视图 + 宿主永远提供的 'code'。 */
-  viewsOf(instance): ViewDescriptor[]
-  /** 记一次"检查过的块"；被认领时带上 renderer id。 */
-  noteSurface(rendererId?: string): void
-  /** 换配置并清空协商缓存，使设置改动立即生效、无需刷新。 */
-  setConfig(patch): void
-  /** 配置的只读快照。 */
-  config(): Readonly<ViewerKitConfig>
-  /** 统计信息，供设置页与自检展示。 */
-  stats(): { surfaces: number; claimed: number; byRenderer: Record<string, number> }
-}
-```
-
-`Kit` 内部**不持有任何 DOM 引用**，因此可以在 Node 里直接单测（见 §10）。
-`instantiate` / `hostFor` 之类也刻意写成不依赖 `this` 的闭包，
-这样调用方把方法从 `kit` 上解构下来也不会坏。
-
-### 5.4 协商算法
-
-```
-候选 = renderers.filter(r => r.match(request))
-胜出 = 候选按 (priority 降序, id 升序) 取第一个
-```
-
-- `id` 升序做 tie-break，是为了保证**加载顺序不影响结果**（DSH 的插件加载顺序不确定）。
-- 胜出渲染器创建实例失败（返回 null 或抛错）时：**不再回退到次优渲染器**，
-  而是保持原生代码块。理由：静默换用另一个渲染器会让用户困惑（"我明明装了两个"），
-  明确的不渲染更可预测。若要支持回退，应由渲染器自己在 `match` 里表达优先级。
-
-### 5.5 视图状态模型
-
-```
-key   = hash(scope + '\0' + lang + '\0' + source)
-value = 'preview' | 'code' | 渲染器自定义 viewId
-```
-
-- **不按 DOM 元素存**：DOM 元素会被 React 重建，按元素存必然丢状态。
-- **按内容指纹存**：同一段代码在会话里出现多次（上文重复引用）时共享视图选择，
-  这符合直觉；内容一变，指纹变，视图重置为该渲染器的 `defaultView`。
-- **作用域**：`scope` 取最近的 `[data-chat-node-key]` 祖先。这样**同一条消息**里
-  重复出现的同一段代码共享视图选择，而**不同消息**里的同一段代码互不影响——
-  比"按会话共享"更精确，代价为零。
-- **指纹算法**：两遍 FNV-1a（不同 salt）+ 长度。碰撞最多导致两段不同的代码共用一个
-  *视图选择*，绝不会导致内容渲染错误，但两遍之后实际不可能发生。
-- **持久化**：`sessionStorage`。会话内记忆，但**不写进磁盘**——
-  渲染器升级后旧的 viewId 可能已不存在，启动时读到未知 viewId 一律回落到默认视图。
-  读取时用内存镜像缓存，避免每次切换都重新 `JSON.parse`。
-
-### 5.6 配置契约：配置怎么从磁盘走到浏览器
-
-这是整个插件最反直觉的一处，**必须写下来**，因为踩错了没有任何提示。
-
-**问题**：用户改的是 `cordis.patch.yml`，那是 Node 侧的磁盘文件；而渲染发生在浏览器里。
-两者之间唯一现成的通道是 boot 线缆，而**它不带配置**：
+### 2.1 boot 线缆不带配置
 
 ```
 宿主产出   graphRow() → { id, url, rev, inject?, immediately?, external? }
 浏览器消费 parseBootManifest() → 逐字段白名单，其余一律丢弃
-浏览器建entry  const options = { name: id }        ← 没有 config 键
+建 entry    const options = { name: id }        ← 没有 config 键
 ```
 
-所以浏览器里的 `apply(ctx, rowConfig)` 拿到的 `rowConfig` **恒为 `undefined`**。
-这不是本插件的缺陷，是 DSH 目前的形状（社区插件 `dshmarket` 走的是同一条路：
-宿主 `apply(ctx, config)` + `webServer.register` + 客户端 `fetch`）。
+所以客户端的 `apply(ctx, rowConfig)` 拿到的 `rowConfig` **恒为 `undefined`**
+（`src/client/index.js:213` 仍保留了一个优先使用它的分支，见 §3.3）。
+探针守着：`the boot wire still carries no config, so P0 is still open`。
 
-**解法**：
+### 2.2 CodeBlock 的 DOM —— 有两个分支
+
+`@deepseek-ai/dsh-client-ui-primitives/lib/index.js:10873-10914`。
+**形状随 props 变**，这是 §5.4 那条认领门存在的原因：
 
 ```
-cordis.patch.yml ──▶ 宿主半体 apply(ctx, config) ──▶ Config schema 校验
-                                                              │
-                                                 失败：响亮报错（宿主无行为，炸不了 web boot）
-                                                              │
-                                                 通过：GET /dsh-viewer-kit/config
-                                                              │
-                                            浏览器 apply() ──┘  首扫之前 fetch 一次
+有 toolbarLabels（会话里常见）
+  <div class="<block> md-code-block">
+    <div class="<bannerWrap>">
+      <div class="<header>" data-code-block-banner>
+        <div class="<heading>"><span class="<language>">html</span>…</div>
+        <div class="<actions>">[wrap][copy]</div>
+    <div class="<content>" data-code-block-content>
+      <div class="shiki"><pre class="shiki css-variables">…</pre></div>     ← 已高亮
+
+无 toolbarLabels
+  <div class="<banner>" data-code-block-banner>
+    <div class="infostring">{lang}</div>        ← 裸文本节点，没有 span
+    <div class="<actions>">[copy]</div>         ← 只有一个按钮
 ```
 
-**两个半体的严格程度故意不同**：
+`readLang`（`dom-seam.js:131-138`）取 `banner.firstElementChild.firstElementChild`
+的 `textContent`。在第二个分支里这两层是 `infostring` 的 `<div>` 与其文本节点，
+`firstElementChild` 为 `null`，于是返回 `''` —— 块退化成「无语言 + 内容嗅探」，
+而**不是**被跳过。
+
+**语言名没有 `data-lang` 之类的后备属性**，它只作为 banner 里的文本存在。
+
+### 2.3 content 节点不生成盒子
+
+`CodeBlock.module.css:72-76`：
+
+```css
+/* Consumers may turn the stable content node into a viewport without changing
+   the default CodeBlock layout. */
+.content {
+  display: contents;
+}
+```
+
+`display: contents` 意味着该节点**没有自己的盒子**，三条后果本插件都依赖：
+
+1. 块的高度**等于**当前可见子节点的高度，没有独立的容器高度；
+2. 写在 content 节点上的 `>` 子选择器仍然匹配它的子节点 —— 视图切换靠这个；
+3. DSH 自己的代码视图也不设高度（`.block :where(pre)` 只有 `padding` 与
+   `overflow-x: auto`），所以固定高度的预览会与它替换的视图语义不一致 ——
+   这是**测量**而不是估算的理由。
+
+### 2.4 稳定态与流式态的形态差异
+
+内容节点的 `firstElementChild`：
+
+| 形态 | 含义 |
+|---|---|
+| `<div class="shiki">` | 已高亮，围栏闭合 |
+| `<pre class="shiki">` | 可能是流式中，**也可能**是宿主不高亮的稳定态 |
+
+判据只读 `child.tagName === 'DIV'`（`dom-seam.js:100`），不参与类名。
+第二种形态是二义的，`settleState` 只报告形状，由调用方结合 banner 标签消歧。
+
+### 2.5 会话边界
+
+轨迹标签页也渲染 `.md-code-block`，但它的 bundle 不带任何 `data-chat-*` 属性，
+会话区带约 60 个。边界因此建在**祖先选择器**上
+（`dom-seam.js:61`，该常量在本文件内，不在 `dom-contract.js`）：
+
+```
+[data-chat-flow],[data-chat-node-key],[data-chat-turn],[data-chat-group-key]
+```
+
+取并集而非单一属性：嵌套层次是 DSH 的事，`data-chat-flow` 在流容器上、
+`data-chat-node-key` 在每条消息行上，块可能在其中任一之下。选一个会在布局调整
+那天静默丢块。
+
+### 2.6 模块系统与 on-demand chunk
+
+四条契约，全部由 `tools/probe-host.mjs` 核：
+
+1. chunk 文件名匹配 `/^client\.[A-Za-z0-9][A-Za-z0-9._-]*\.js$/`，且与入口同目录；
+2. 不带内容 hash —— chunk 的 id 是 `<包名>/<文件名>`，带 hash 就自指循环；
+   请求 URL 带入口的 `?rev=`，重建必然换 URL；
+3. 入口必须用 `require.async('./client.x.js')`，不能用 `import()` ——
+   CJS 下 `import()` 编译成普通 `require`，会抛 `missed the module table`；
+4. 每个产物需要各自的 `__ModuleLoader__.load({ id })`，所以 `banner` 必须是
+   以 chunk 名为参数的**函数**。
+
+因此引擎声明为**第二个 entry**而非代码分割产物：第 3 条的请求是一个没有
+import 表达式支撑的字符串，打包器看不见它。
+
+产物内**会**出现 `require` 调用，就是这条 chunk 请求
+（`require.async`），其余基线模块一次都不取。
+
+### 2.7 客户端 `ctx`
+
+cordis 的 `Context` 是 proxy，**读未注册成员直接抛**；抛在 `apply` 里等于
+web boot 失败，而 DSH 把这种失败当致命启动错误（boot 审计只报
+`<name>: failed`，栈只进浏览器控制台）。
+
+`tests/ctx-harness.mjs` 暴露 `get` / `effect` / `on` / `provide` 四个成员，
+读别的即抛。它**比真实客户端 context 更窄**（后者混入 16 个成员，
+cordis `reflect.ts:219-222`）——加宽 harness 等于删掉那道守卫。
+本插件实际只用到 `get` 与 `effect`；允许清单只在 `AGENTS.md` §5.5。
+
+`document` / `console` / `MutationObserver` 是浏览器全局，不在 `ctx` 上。
+样式表自己插 `<style data-plugin="dsh-viewer-kit">` 并在 disposer 里移除。
+
+翻译字典的注册**不由 `ctx.effect` 持有**，理由见
+[03-pitfalls.md](03-pitfalls.md) §6。
+
+---
+
+## 3. 配置契约
+
+### 3.1 单一来源
+
+`src/schema.js` 的一张字段表同时派生出三样东西：
+
+- 宿主半体导出的 `Config`（Standard Schema v1，**零依赖手写** —— 宿主半体是
+  原样拷贝、没有打包器，schema 库得在运行时从 profile 解析）；
+- 客户端的 `DEFAULT_CONFIG` 与宽松回落 `resolveConfig`；
+- `cordis.patch.yml` 里的配置文档。
+
+字段表还导出 `DEFAULT_PROTOTYPE_STYLE`（27 行 / 986 字符），它是
+`prototypeStyle` 这个键的**默认值**，不是对它的第二份描述。
+
+### 3.2 两侧严格程度故意不同
 
 | | 宿主半体 | 客户端半体 |
 |---|---|---|
 | 值不对 | **响亮失败** | 静默回落默认值 |
 | 不认识的键 | **报错** | 忽略 |
-| 理由 | 配置写错本该立刻发现；宿主半体无行为，失败只记日志 | 路由 404、宿主半体没装、两版本不一致 —— 这些情况下**能渲染**比什么都看不到重要 |
+| 理由 | 配置写错本该立刻发现；宿主半体无行为，失败只记日志 | 路由 404、宿主半体没装、两版本不一致 —— 能渲染比什么都看不到重要 |
 
-**唯一真相来源**：`src/schema.js` 的一张字段表，同时派生出
+### 3.3 通道与持有形态
 
-- 宿主半体导出的 `Config`（Standard Schema v1，**零依赖手写**——宿主半体是原样拷贝、
-  没有打包器，一个 schema 库得在运行时从 profile 解析）
-- 客户端半体的 `DEFAULT_CONFIG` 与宽松回落
-- `cordis.patch.yml` 里那段配置文档
+boot 线缆不带配置（§2.1），所以宿主把结果发布在一条只读 HTTP 路由上，
+浏览器在首次扫描前取一次：
 
-三处由一张表派生，并有测试双向断言它们一致。**任何一处单独写第二份，就是一个会过期的副本。**
+```
+cordis.patch.yml ─▶ apply(ctx, config) ─▶ Config schema 校验
+                                             │ 失败：响亮报错
+                                             ▼ 通过
+                                     GET /dsh-viewer-kit/config   （cache-control: no-store）
+                                             │
+                        浏览器 apply() ──────┘  1200ms 超时，之后回落默认值
+```
 
-**接缝必须整体推迟到配置落地之后**：`createDomSeam` 在**构造时**就挂上 MutationObserver，
-所以推迟的不是一个 `scan()` 调用，是整个接缝。首屏因此就是最终结果，没有"先按默认值出
-再跳一次"。
+**接缝整体推迟到配置落地之后**：`createDomSeam` 在**构造时**就挂上
+MutationObserver（`dom-seam.js:460`），所以推迟的不是一个 `scan()` 调用，
+是整个接缝。首屏因此就是最终结果。
 
-**`rowConfig` 的快捷路径**：万一将来 DSH 真的开始发配置，客户端会优先用它并跳过这一跳 ——
-`tools/probe-host.mjs` 有一条**故意埋的绊子**守着这件事（见 §13.7）。
+配置在两侧各存一份，两份都不自己更新：
+
+| | 持有者 | 位置 | 更新的时机 |
+|---|---|---|---|
+| 宿主 | `resolveConfig` 算一次，闭包捕获 | `src/index.js:94` | 宿主半体重新激活 |
+| 浏览器 | 每次页面加载 fetch 一次 | `src/client/index.js:217` | 整页重新加载 |
+
+**配置文件本身只在 boot 路径上被读**（`dsh-app-boot` 的 `loadProfile` /
+`loadOptionalPatches`），`dsh-app-boot` 与 `dsh-cordis-host-runner` 里没有针对它的
+文件监听。唯一写它的地方是 `ConfigEditor.edit()`（`dsh-config-editor/lib/index.js:69`），
+而它**写完会自己调 `reconcileProfilePatches`**（`:125`），把变化推给 Loader：
+
+```
+设置界面 ─▶ settings.mutate(...)            dsh-client-ui-settings/lib/client.js:1182
+             ▶ configEditor.edit(entry, …)   dsh-settings/lib/index.js:508
+             ▶ 原子写回 patch 文件           dsh-config-editor/lib/index.js:123
+             ▶ reconcileProfilePatches(...)  :125
+             ▶ Entry.update() → fiber.update() → apply(ctx, 新 config)   同进程重跑
+```
+
+也就是说**宿主侧的热更通道是通的**，而本插件目前走不到它：`dsh-settings` 的
+`describe()` 用 `volatileForm(schema)` 收集表单，取不到就整条跳过该插件
+（`dsh-settings/lib/index.js:418-419`），`write()` 对没有 volatile 字段的条目
+直接抛 `has no volatile fields`（`:505-506`）。本插件的 `Config` 没有声明任何
+`.volatile()`，所以**改配置文件需要重启 profile**。
+
+DSH 补上这条声明之后，本插件这边还有两处要跟上：宿主在**请求时**解析而不是
+apply 时（`src/index.js`），以及客户端在窗口重新获得焦点时重取一次
+（`src/client/index.js`）。后者**不能**做成"随时重取并逐块重协商" ——
+改块高度正是 §6 那条滚动不变量要抵消的位移来源，页面级的一次性重建才是安全形态。
 
 ---
 
-## 6. 接缝设计（L1 + L3）
+## 4. 核心契约（L4）
 
-这是整个插件里**唯一允许直接操作 DSH DOM** 的地方，也是风险最集中的地方。
-因此规则必须写死并可验证。
+`contract.js` / `kit.js` / `view-state.js` 三个文件不引用 `document`，
+所以协商、指纹、视图状态全部可在纯 Node 下测。
 
-### 6.1 定位
+### 4.1 RenderRequest
 
-```js
-// 1. 找到所有渲染出的代码块。
-//    注意：data-code-block-banner 在 banner（header）上，不在代码块根上，
-//    所以选择器只有 .md-code-block；找不到 banner 的块会被 surface 拒绝。
-document.querySelectorAll('.md-code-block')
-// 2. 提取语言名（唯一来源是 banner 里的语言文本）
-banner.firstElementChild.firstElementChild.textContent
-// 3. 提取源码（稳定态的 pre 文本）
-content.querySelector('pre').textContent
+```ts
+{
+  id: string           // 指纹：fingerprint({ scope, lang, source })
+  surface: 'code-block' | 'tool-call' | 'document'
+  lang: string
+  source: string
+  meta?: { info?: string }
+}
 ```
 
-选择器全部集中在 `src/client/dom-contract.js` 这一个文件里，每条都附了
-"这段 DOM 来自哪个包的哪个函数"的可复核引用。**升级 DSH 时只需要核对这一个文件。**
+**`createRequest` 不做归一化**（`contract.js:250`，`input.lang ?? ''`）。
+`lang` 的归一化由调用方在传入前完成（`code-block-surface.js:105` 调
+`normalizeLang`）。归一化规则必须与宿主一致，否则 ```html title="x" 会
+认领出 `html title="x"` 而匹配不到任何东西：
 
-### 6.2 发现与回收
+```
+取 /^[\w-]+/ 去掉 info 串 → 转小写 → 折叠别名
+htm|xhtml → html    chart → echarts    tsv → csv
+```
 
-用一个 `MutationObserver`（`childList + subtree`，观察 `document.body`），
-配合一次全量扫描，处理三类变化：
+### 4.2 指纹
+
+```
+key = `${scope}\0${lang}\0${source}`
+id  = `${fnv1a(key,0).toString(36)}.${fnv1a(key,0x9e3779b9).toString(36)}.${key.length.toString(36)}`
+```
+
+`scope` 取最近的 `[data-chat-node-key]` 祖先（`dom-seam.js:79-82`）：
+同一条消息里重复的同一段代码共享视图选择，不同消息里的互不影响。
+碰撞最多导致两段不同的代码共用一个**视图选择**，不会导致内容渲染错误。
+
+### 4.3 Renderer
+
+```ts
+interface Renderer {
+  id: string
+  label?: string
+  priority?: number          // 默认 0，越大越优先
+  match(request: RenderRequest): boolean
+  create(host: RenderHost): RendererInstance | null
+}
+```
+
+`match` 与 `create` 分开：前者是纯判定、可缓存、可重复调用；
+后者有副作用且必须可失败。
+
+`RenderHost` 交给渲染器的东西很窄：建节点、挂载、清空容器、读尺寸上限、
+上报致命错误、读配置。**`config()` 返回的是 Kit 内部的活对象**
+（`kit.js:205`，未冻结未拷贝）；真正返回冻结快照的是 `kit.config()`（`:248`）。
+
+`viewsOf`（`kit.js:152-158`）把渲染器自己的视图里 id 为 `'code'` 的滤掉，
+再补上宿主自己的 `CODE_VIEW`；渲染器一个视图都不给时，标签退化为 `'source'`。
+所以渲染器只需要实现增强视图，**`'code'` 是零成本**的：切回代码只是把模式属性
+改回去并清空自有容器，原生 `<pre>` 原封不动地重新露出来。
+
+### 4.4 协商算法
+
+`negotiate`（`kit.js:111-143`）的五步，顺序有意义：
+
+```
+1. !config.enabled                                   → null（总开关）
+2. disabledRendererIds.includes(request.lang)        → null（围栏名档，在任何 match 之前）
+3. 查 negotiationCache[request.id]
+4. 遍历 sorted()：
+     disabledRendererIds.includes(renderer.id)       → continue（渲染器 id 档）
+     renderer.match(request) 抛错                    → onError + continue（不炸接缝）
+     第一个 === true 的即胜出
+5. 写入缓存
+```
+
+`sorted()` 是 `priority` 降序、`id` 升序。按 `id` 而不是注册顺序决胜，
+是为了让结果与 DSH 加载社区插件的顺序无关。
+
+两个禁用档的语义不同：围栏名档是**整块否决**（该块不进入任何渲染器），
+渲染器 id 档是**跳过该渲染器**，块重新交给剩下的渲染器。
+
+胜出者 `create` 失败时**不回退到次优渲染器** —— 静默换一个会让用户困惑，
+明确的不渲染更可预测。
+
+**`defaultView()` 是 Kit 级的**（`kit.js:164-166`，返回 `'preview'` 或 `'code'`），
+与渲染器无关。渲染器若不认 `'preview'`，`pickInitialView` 会退到 `views[0].id`。
+
+### 4.5 视图状态
+
+```
+key   = RenderRequest.id（内容指纹）
+value = 'code' | 渲染器自定义 viewId
+```
+
+按内容而不是按 DOM 元素：React 会重建这些节点，按元素存必然每次重渲染都丢。
+
+持久化用 `sessionStorage`，键 `dsh-viewer-kit:views:v1`；读取走内存镜像，
+只在写入和首次读取时碰 storage。**不可用时静默降级为纯内存**（`safeStorage`
+会实际写一个探针键，因为隐私窗口和内嵌 webview 暴露对象却仍会在写时抛）。
+存储损坏或写满都只丢跨刷新的记忆，不影响渲染。
+
+**只有用户主动点的视图才被记住**（`code-block-surface.js:311` 的 `byUser`）。
+首次打开的视图由 `defaultToPreview` 推导，把它记下来会让那个设置在第一次
+使用后就被冻结。
+
+`kit.subscribe` **不随视图变化触发** —— 它只在 `invalidate()` 时被叫，
+而 `invalidate()` 由 `register` / 注销 / `setConfig` 触发。视图变化的事件发到
+`view-state` 自己的 listener 集（`view-state.js:94-96`），Kit 不转发。
+
+---
+
+## 5. 接缝（L1 + L3）
+
+`dom-seam.js` 与 `code-block-surface.js` 是**仅有的两个**碰 DSH DOM 的文件。
+
+### 5.1 发现与回收
+
+一个 `MutationObserver`（`childList + subtree`，观察 `doc.body`）加一次全量扫描：
 
 | 情况 | 处理 |
 |---|---|
-| 新代码块出现 | 建立 surface |
-| 已知 surface 的 DOM 被 React 重建 | 丢弃旧状态，重新建立 |
-| 代码块被移除 | 调用 `instance.dispose()`，从索引中移除 |
+| 新块出现（含新增节点里的嵌套块） | `evaluate` |
+| React 换掉了 banner 子树 | `childList` 记录的 target 向上找块再 `evaluate` |
+| 块被移除 | `dispose`，从索引里删除 |
 
-用 `WeakMap<Element, SurfaceRecord>` 保存索引，天然随元素回收。
+索引 `surfaces` 是 `WeakMap<Element, { dispose, bytes }>`。
+`quietTimers` / `retryCounts` / `arrivals` 是三个**强引用** `Map`，
+`dispose()` 会清空它们。
 
-### 6.3 流式守卫（不靠定时器猜）
+### 5.2 已认领块的再评估
 
-判据来自 §2.3 的 DOM 形态差异：
+`surfaces.has(element)` 时（`dom-seam.js:299-322`），认领只在**两个条件同时成立**
+时保留：
 
 ```
-内容节点的 elementChild 是 <div>  → 稳定态（已高亮）→ 立即接管
-内容节点的 elementChild 是 <pre>  → 流式态              → 跳过
+ownsInjection(element)            ← 我们注入的开关节点还在
+readSource(content).length === claimed.bytes   ← 源码还是认领时那一份
 ```
 
-对于**不支持高亮**的语言（如 ```` ```text ````），DSH 直接渲染 `plain` 分支且流式期间
-会持续变化。此时退化为"内容节点连续 300ms 未变更"才接管。
+任一不成立就 dispose 重来。第一条挡的是 React 重建了 banner 子树（我们的节点
+跟着走了，而那个 mutation 正好回调到这里）；第二条挡的是**认领之后流又恢复了** ——
+预览一份被截断的文档和开关消失是同一种静默。
 
-**这条规则的价值**：流式期间绝不接管，因此不存在"预览在打字过程中不停重建 iframe"的问题。
+### 5.3 认领门
 
-> **重试是有界的。** 真正负责发现"围栏闭合"的是 MutationObserver：DSH 换掉内容节点的
-> 子元素是一个我们看得见的 `childList` 变更。定时器只是兜底——防止某次变更在节点
-> 拿到最终形态之前就到了。因此重试次数有上限（`MAX_QUIET_RETRIES`，约 30s 静默后放弃），
-> 否则一个永远不 settle 的块会让一个定时器空转到页面结束。
+`evaluate` 的判断顺序（`dom-seam.js:297-368`）：
 
-> **曾经踩过的坑**：`data-chat-running` 看起来是天然的"这一回合还在跑"信号，
-> 但它挂在 `RunningStatus` 上——回合**内容之后**的一个"深度思考中"指示器，
-> 是 flow item 的**兄弟节点而非祖先**（`dsh-client-ui-chat/lib/client.js:3918-3920`）。
-> 所以 `element.closest('[data-chat-running]')` 对任何代码块都返回 `null`，
-> 那个守卫**一次都没生效过**，是纯死代码。已删除，并在
-> [`dom-contract.js`](../src/client/dom-contract.js) 里留下记录，
-> 免得有人再犯同样的错。流式保护真正靠的是上面的形态判据。
+```
+disposed                                  → 直接返回
+surfaces.has(element)                     → 见 §5.2
+!inConversation(element)                  → 返回，**不排重试**
+content === null                          → schedule
+source.trim() === ''                      → schedule
 
-### 6.4 与 React 共存的不变量（承诺）
+generic = isGenericLabel(label)
+!generic && settleState(content).reason !== 'highlighted' && !hasSettled(…)
+                                          → schedule
+否则                                       → 认领
+```
 
-> 以下六条是本插件对宿主 DOM 的全部写操作，越界即视为 bug：
+三支的分工：
 
-1. **只增不删**：只在 `[data-code-block-content]` 里**追加**一个带
-   `data-dvk-root` 标记的自有节点；永不删除、移动或改写任何 DSH 创建的节点。
-2. **可见性用样式而非移除**：切换视图时，只改内容节点上**我们自己的** `data-dvk-mode`
-   属性，由本插件的样式表决定谁可见。React 不会清除它没有设置过的属性。
-   切回代码时还会把自有容器清空——所以"代码视图"是**零成本**的：不建 iframe，
-   不重绘，不失真。
-3. **控件挂在 banner 的操作组**：作为 `[data-code-block-banner]` 最后一个子节点
-   （也就是 `actions` 组）的最后一个子节点追加。该组的子节点由 React 按下标协调，
-   长度恒定（wrap + copy），多出的第 3 个节点 React 既不会认领也不会回收。
-4. **不碰 `<pre>` 的 innerHTML**：原生代码内容始终保持原样，切回 `code` 是零失真。
-5. **卸载即复原**：插件停用时移除所有自有节点与自有属性，不留残迹。
-6. **只写自己造成的高度变化的补偿**：认领一个块会改变它的高度（§6.6），
-   由此产生的滚动位移由 `scroll-guard.js` 写回祖先滚动容器的 `scrollTop` 抵消。
-   这是唯一一处**祖先**写操作，且只在块位于视口之外时发生。
+**① 通用标签** —— banner 显示的是本地化兜底文案，说明宿主对这个围栏没有高亮器，
+**`<div class="shiki">` 外壳永远不会出现**，等它会等到重试预算耗尽。
+这类块**当场认领**，`lang` 置空交给渲染器按内容判断。判断依据只有
+`GENERIC_LABELS`（`dom-seam.js:29-41`，中英文各若干），不看内容。
 
-> **为什么第 5 条是承诺而不是副作用**：DSH 的模块系统保证"禁用条目会等待其异步效果
-> 结束后再驱逐未使用的模块和样式"（`dsh-client-modules/README.md:42`），
-> 所以我们必须把自己的清理挂在 `ctx.effect` 的 disposer 上。
+**② 高亮态** —— 形态差异本身就是信号，围栏闭合时那次子元素替换是可见的
+`childList` 变更。
 
-> **第 3 条有一个我们依赖的细节**：`actions` 组里那个可选的 `status` 元素会导致
-> React 在最前面插入一个 DOM 节点，把我们的节点整体后移一位。视觉效果仍然是
-> "在换行/复制按钮左边"，但如果将来观察到错位，第一个要查的就是这里。
+**③ 真标签 + plain 正文** —— 宿主给了一个它不打算高亮的语言名，形态永不改变。
+只有这一支等 `hasSettled`。
 
-### 6.5 降级矩阵
+`hasSettled`（`dom-seam.js:259-273`）：
 
-| 情况 | 行为 |
-|---|---|
-| 无渲染器认领 | 原生代码块，不加任何东西 |
-| 渲染器 `create` 返回 null | 原生代码块，不加开关 |
-| 渲染器只有 1 个视图（没有增强视图） | 原生代码块，不加开关——加一个永远切不动的按钮是噪音 |
-| 渲染器 `create` 抛错 | 原生代码块，控制台记一次带 renderer id 的错误 |
-| 源码超过 `maxSourceBytes` | 原生代码块，不加开关（`negotiate` 之前就拒绝） |
-| 宿主 DOM 结构变化（选择器失配） | 逐块降级为 no-op，控制台告警，对话窗口不受影响 |
-| 宿主没有 `MutationObserver` | 接缝整体停用并告警一次，插件变成纯装饰（不崩） |
+```
+bytes = source.length                      （UTF-16 code unit，不是字节）
+未见过 或 长度变了                         → arrivals.set(...); retryCounts.delete(); false
+now - seen.since < SETTLE_QUIET_MS         → false        （= PLAIN_SETTLE_MS * 2 = 600ms）
+否则                                        → arrivals.delete(); true
+```
 
-### 6.6 认领一个块会改变它的高度，而读者的滚动位置没人负责
+**两个静默窗口而不是一个**：一次观察无法区分"围栏闭合"与"模型停下来想"，
+而误判成闭合会挂载一份半截文档的预览。两个连续不变才把"没有变化"变成决定。
 
-**现象**：一个会话里有两个以上 HTML 块，停在最下面，往上滚到最上面那个块时，
-界面会跳到下面那个块；跳动的幅度与 HTML 源码长度成正比；触发过一次之后来回滚不再发生；
-`enabled: false` 时完全不复现。
+**为什么按内容而不是按形态**：形态这个代理在两个方向上都会错 —— 流式中与
+高亮语言围栏的稳定态同形，而宿主永不高亮的围栏会一直停在 `<pre>` 上，
+等形态就等于等到预算耗尽。内容不会：还在到达的围栏每个 token 都变长。
 
-**根因链条**：
+### 5.4 重试预算
 
-1. 内容节点是 `display: contents`（§2.3），所以**块的高度就等于当前可见子节点的高度**。
-   认领一个块要把"和源码一样高的 `<pre>`"换成"封顶 `maxPreviewHeight` 的视图"，
-   对一份原型 HTML 来说这个差值是几千像素。
-2. 会话是**虚拟列表**：`@deepseek-ai/dsh-client-ui-chat` 用 TanStack Virtual
-   以 `overscan: 3` 挂载 turn，所以一个块经常在读者**上方好几屏**的位置被认领。
-3. 两个本该兜底的机制，恰好在这个时刻都不工作（这三条宿主事实记在
-   `dom-contract.js` 的 "The conversation's scroll model"，升级时只核对那里）：
-   - 浏览器的 **scroll anchoring** 在滚动手势进行中被抑制，而接缝是在
-     `MutationObserver` 回调里认领的，也就是在滚动**当中**；
-   - 虚拟列表自己的补偿（`host-chat.js:3140`）在
-     `scrollDirection === "backward"` 时**故意不修正**——往上滚时修正会跟读者自己的
-     滚动打架。
+`schedule`（`dom-seam.js:408-422`）在 `PLAIN_SETTLE_MS`（300ms）后重跑
+`evaluate`，次数上限 `MAX_QUIET_RETRIES`（100，约 30s）。同一个元素已有定时器时
+不重复排。
 
-于是读者正在看的内容按同样多的像素被推走，而没有任何东西把它推回来。
-"只发生一次"是这条链路的推论：块的高度只变一次，`itemSizeCache` 之后记住的就是新值。
+它是**兜底**而不是主信号 —— 围栏闭合是 MutationObserver 直接看见的
+`childList` 变更。定时器只防"某次变更在节点拿到最终形态之前就到了"。
 
-**做法**：`src/client/scroll-guard.js` 的 `keepingScrollPosition(node, change)`
-把整次视图切换包起来。切换前记下滚动容器的 `scrollTop` 与块的高度带，
-切换后若块的高度变了，就把 `scrollTop` 按同一个增量写回。
+它同时是这些路径的定时器：无渲染器认领、超限、单视图、`create` 返回 null、
+content 节点缺失、源码为空。
 
-**判据是"视口中线"，不是"有没有相交"**：
+`hasSettled` 每次观察到长度变化就 `retryCounts.delete(element)`
+（`:267`），所以**持续增长的块不会耗尽预算**。
 
-块的高度变化**只会移动它下方的内容**。所以唯一要问的是——读者在读的是不是那部分内容。
-视口中线（可见区域的中点）回答这个问题，而且不需要调容差：
+### 5.5 对宿主 DOM 的写操作
 
-| 块底边 | 读者在读 | 动作 |
+`code-block-surface.js` 在一个块里只做这些事：
+
+1. **只追加带 `data-dvk-*` 标记的自有节点**，不删除、不移动、不改写任何 DSH 创建的节点；
+2. **可见性用样式**：切换视图只改 content 节点上我们自己的 `data-dvk-mode`，
+   由自有样式表决定谁可见。React 不会清除它没设置过的属性；
+3. **两个节点都追加到 `banner.lastElementChild`**（尾部操作组）：视图开关
+   `[data-dvk-switch]` 与放大按钮 `[data-dvk-action="expand"]`。后者是开关的
+   **兄弟**而不是子节点，所以移除开关带不走它；
+4. **不碰 `<pre>` 的 innerHTML**，切回代码零失真；
+5. **注入前先清残留**（`:168-169`）：扫掉块里的 `[data-dvk-switch]` 与
+   content 里的 `[data-dvk-root]`。HMR 重新启用、或 React 重建节点时保留了我们
+   的子节点，都会让第二次注入叠出第二个开关；
+6. **`dispose()` 只删自己加的**：`viewRoot` / `switcher` / `expandControl`
+   与 content 上的 `data-dvk-mode`；
+7. **唯一一处祖先写操作**是滚动补偿（§6），由 `scroll-guard.js` 完成。
+
+`banner.lastElementChild` 假定它是操作组，代码**不校验**。
+
+### 5.6 降级矩阵
+
+| 情况 | 行为 | 用户可见提示 |
 |---|---|---|
-| 在中线**之上** | 主要是块**下方**的内容，刚被整体移动 | 按 `delta` 补偿 |
-| 在中线**之下** | 块本身，或块上方的内容——两者都不动 | 不补偿 |
+| 不在会话容器内 | 静默跳过，**不排重试** | 无 |
+| content 节点缺失 | 重试至预算耗尽 | 无 |
+| 源码为空白 | 重试至预算耗尽 | 无 |
+| 通用标签或高亮态 | 认领 | 开关 |
+| 真标签 + 未静默 | 重试至预算耗尽 | 无 |
+| `enabled: false` | 协商返回 null | 无 |
+| 围栏名在 `disabledRendererIds` 里 | 整块否决 | 无 |
+| 超 `maxSourceBytes` | 认领后 `withinLimits` 为假 → 返回 null | 无 |
+| 无渲染器认领 | 返回 null | 无 |
+| `create` 返回 null 或抛错 | 返回 null | `console.error` |
+| 只有 `code` 一个视图 | dispose 实例，返回 null | 无 |
+| `banner.lastElementChild` 为 null | dispose 实例，返回 null | 无 |
+| 宿主无 `MutationObserver` | 接缝整体返回全套 noop | `console.error`（一次） |
 
-这条判据同时排掉了一个反直觉的 case：**视口下方的块永远不补偿**。
-它在视口下方变高，推走的是它**下面**的内容，读者看不见；补偿等于白挪页面。
-
-**真正致命的那一半不是位移，是坐标不存在。** 一份 15,000px 高的源码塌成 320px 预览，
-整篇会话一帧之内短了 15,000px。站在 15,937px 处的读者当场越过新文档的末尾，
-浏览器只能把他夹到底部——不是"跳一下"，是直接到会话结尾。
-scroll anchoring 在这里救不了，因为那个偏移上已经没有东西可以锚。
-
-**两个错判（记下来，因为它们都会让人重新写一遍同样的错东西）**：
-
-1. **"有一点点相交就算在屏幕上"→ 放过了真正出事的那一次。** 长源码进场时通常只露
-   `122px` 底边、其余 `15,602px` 已在视口之上，而视口里 85% 是块下方的内容——
-   那些才是要保的。按相交判定跳过它，坐标随即越界。
-2. **"视口上下同号补偿"→ 补偿了不该补偿的那一侧。** 见上表。
-3. **"贴底就不动"这条判断放在 `change()` 之后 → 它恒为真。** 高度变化一发生，
-   文档就短了；拿变更前的 offset 去比变更后的 `scrollHeight`，每个人都会被判成越界，
-   而越界恰恰是唯一必须补偿的那种情况。见下。
-
-**贴底时不动 —— 但要问宿主，不要算距离。** 宿主跟随流式输出时会把 offset 从总高度
-重新推导（`anchorTo: "end"`，同时给滚动容器加 `overflow-anchor: none`），
-它已经吸收了这次高度变化；我们再补一次就是同一个变化让读者被挪两次。
-
-但"离底部近"**不等于**"被钉住"：一个长代码块可以占掉大半个会话，
-读者坐得靠后只是内容恰好在那里。距离本身也猜不准——够不够"近"取决于视口高度，
-随窗口变。
-
-所以读宿主自己的状态：祖先上有 `[data-chat-following-tail]`
-（`dom-contract.js` 的 `FOLLOWING_TAIL_SELECTOR`），而且**必须在 `change()` 之前读**。
-读不到就当作"没被钉住"——补偿一个跟随流式的读者会让他悬在半空，
-补偿一个没被钉住的读者才是他想要的。DSH 升级改名了这个属性的代价，
-只是流式期间的一点小退步，方向落在安全的那一侧。
-
-**代价**：每次认领强制两次同步重排（读 `getBoundingClientRect` 前后各一次）。
-这正是它包住**整次视图切换**、而不是包住切换里的每一次 DOM 写的原因。
-
-**测试**：`tests/run.mjs` 的 "scroll stability" 一节。前八条直接驱动 guard，
-把它的每个决定单独钉住（"只露一点顶边"、"视口下方"、"靠后但没被钉住"、
-"被钉住"都是真实场景）；后两条走接缝，因为一个没人调用的 guard 能把前八条全过。
-夹具的 `scrollHeight` 跟着块一起变——真实会话就是这样，而这正是补偿必须夹取的原因。
+除两条 `console.error` 外，**所有降级都不产生任何用户可见文字**。
 
 ---
 
-## 7. 内容来源
+## 6. 滚动补偿
 
-### 7.1 v0：围栏代码块（`surface: 'code-block'`）
+认领一个块必然改变它的高度：内容节点是 `display: contents`（§2.3），
+所以块高**等于**可见子节点的高度，认领把"和源码一样高的 `<pre>`"换成封顶的视图。
 
-被动。模型不需要知道本插件存在。认领完全由渲染器的 `match(request)` 决定。
+三个本该兜底的机制恰好都不工作（三条宿主事实记在 `dom-contract.js` 的
+"The conversation's scroll model"，升级时只核对那里）：
 
-### 7.2 v1：`viewer_render` 工具（`surface: 'tool-call'`）——为结构化内容预留
+- 会话是**虚拟列表**（TanStack Virtual，`overscan: 3`），一个块经常在读者
+  **上方好几屏**的位置被认领；
+- 浏览器的 **scroll anchoring** 在滚动手势进行中被抑制，而接缝是在
+  `MutationObserver` 回调里认领的，也就是在滚动当中；
+- 虚拟列表自己的补偿在 `scrollDirection === "backward"` 时**故意不修正** ——
+  往上滚时修正会跟读者自己的滚动打架。
 
-当内容本身不是"一段代码"而是"一份数据"时（ECharts option、大宽表、JSON schema），
-围栏形式很别扭：一个几百 KB 的 JSON 塞进围栏既费 token 又无法增量阅读。
-届时新增 Host 半体工具 `viewer_render({ format, source })`，
-客户端在 `tool.call.toolview[viewer_render]`（开放 key 域，不遮蔽）里渲染。
+`keepingScrollPosition(node, change)`（`scroll-guard.js:127-168`）：
 
-**它与 v0 共用同一条管线**：工具结果被归一化成同样的 `RenderRequest`，
-交给同一个 `Kit` 协商。因此新增这条来源**不改动 L3/L4/L5**。
-这是"来源"与"渲染"分离的直接收益。
+```
+scroller = 向上找 clientHeight > 0 && scrollHeight > clientHeight 的祖先
+           （用几何而非计算样式 —— 不能滚的祖先无论 overflow 写什么都忽略 scrollTop）
+无 scroller / 无布局               → change()
+before.bottom >= 中线              → change()      ← 判据
+scroller.closest('[data-chat-following-tail]') → change()   ← 必须在 change() 之前读
+result = change()
+delta = after.height - before.height
+scroller.scrollTop = clamp(0, scrollHeight - clientHeight, offset + delta)
+```
 
----
+**判据是视口中线**（`:139`）：`before.bottom < viewport.top + viewport.height / 2`
+才补。块的高度变化只移动它**下方**的内容，所以唯一要问的是读者在读的是不是那部分。
 
-## 8. 安全模型
+中线由 `bandOf` 的 `bottom`（`top + height`）推出而不是读 `rect.bottom`，
+这样"在不在屏上"和"有多高"不会来自两个可能不一致的数。
 
-模型产出的 HTML 是**不可信输入**（可能来自被注入的网页、被污染的仓库文件）。
+`FOLLOWING_TAIL` 必须在 `change()` 之前读，且问宿主而不算距离：高度一收缩文档
+就短了，事后拿旧 offset 比新 `scrollHeight` 会把每个读者都判成越界，而越界
+恰恰是唯一必须补偿的那种情况。宿主跟随流式时会自己从总高度重新推导 offset，
+再补一次就是同一次变化让读者被挪两次。
 
-| 风险 | 措施 |
-|---|---|
-| 预览页读取宿主 DOM / cookie | `<iframe sandbox>` **绝不**同时给 `allow-same-origin` 和 `allow-scripts` |
-| 默认执行脚本 | 默认 `sandbox=""`（完全禁脚本）；配置项 `html.allowScripts` 显式开启后才用 `sandbox="allow-scripts"` |
-| 外泄来源 | `referrerpolicy="no-referrer"` |
-| 网络访问 | 开启脚本后仍不注入任何宿主 API；如需断网由用户自行在沙箱文档内声明 |
-| 高度撑爆布局 | `maxPreviewHeight` + 内部滚动 |
-| 逃逸到新窗口 | v0 **不提供**"在新标签页打开"（那会以宿主同源打开，不可控）。若将来提供，必须显式二次确认并在文档中写明风险 |
-
-> 之所以把"新标签页打开"排除在外：宿主页用 `blob:` URL 打开会以宿主同源执行，
-> 这正好绕开了 iframe 沙箱提供的全部保证。这是一个容易被忽视的降级。
-
----
-
-## 9. 迁移路径（接缝可替换性）
-
-`L1/L3` 被刻意压缩到两个文件，它们的输出是一组 `RenderRequest`。
-如果将来 DSH 提供了官方渲染扩展点（例如 `conversation.chat.node` 之外的新 slot，
-或 markdown 渲染器暴露节点扩展），只需：
-
-1. 新写一个 `Surface` 实现，产出相同的 `RenderRequest`；
-2. 保留 `code-block-surface.js` 作为回退；
-3. `dom-seam.js` 里按能力探测选择实现。
-
-`L4 Kit` 与 `L5 Renderers` **一行都不用改**。这是把接缝做成"适配器"而不是"框架"的意义。
+补偿路径上共 **3 次** `getBoundingClientRect`（`:132` `:133` `:150`），
+外加 `scrollTop` / `scrollHeight` / `clientHeight` 三次布局读。它包住
+**整次视图切换**（`code-block-surface.js:322`）而不是切换里的每一次 DOM 写。
 
 ---
 
-## 10. 测试策略
+## 7. 安全模型
 
-| 层 | 测试方式 | 理由 |
+模型产出的 HTML 是**不可信输入**。预览一律走 `<iframe sandbox>`，
+`referrerpolicy="no-referrer"`。
+
+### 7.1 sandbox 取值随模式而变
+
+| `previewHeightMode` | `sandbox` | 决定于 |
 |---|---|---|
-| L4 Kit | Node 下直接单测（无 DOM 依赖） | 协商、优先级、视图状态是纯逻辑，必须可测 |
-| L1 接缝 | 用**从 DSH 真实产物抄下来的 DOM 片段**做夹具，在轻量 DOM 垫片上跑 | 不依赖浏览器即可验证接缝逻辑 |
-| L3 Surface | 同上，夹具驱动 | |
-| L5 渲染器 | 每个渲染器自带夹具 + 断言 | |
-| **产物本身** | 把构建出的 `client/client.js` 塞进一个假的 `__ModuleLoader__` 里真跑一遍 | 测的是 DSH 真正会serve 的那份文件，而不是源码 |
-| 端到端 | 安装到 profile 后人工验证 | 自动化 E2E 成本过高，v0 不做 |
+| `measure`（**默认**） | `allow-scripts` | **无条件** —— 测量脚本就是文档本身，它自报内容高度（`html.js:304`） |
+| `fit` / `fixed` | `htmlAllowScripts ? 'allow-scripts' : ''` | 只有 `htmlAllowScripts`（`html.js:316`） |
 
-> DOM 垫片（`tests/dom-shim.mjs`）只需实现接缝实际用到的 API（元素创建、属性、
-> 一个真的小型 CSS 选择器引擎、`MutationObserver`、`sessionStorage`），
-> 而不是完整的浏览器环境——因为接缝**只用**这些。
->
-> 这套垫片 + 夹具不是摆设，它在开发过程中真的抓到了四个 bug：
-> 选择器把 banner 属性错配到代码块根上、渲染器拿不到挂载点、
-> 接缝漏传翻译函数、以及接缝依赖全局 `Element` 构造器。
+**任何配置下都不同时给 `allow-scripts` 与 `allow-same-origin`**，所以文档始终是
+不透明源，读不到宿主的 DOM / cookie / storage。
+
+### 7.2 默认路径上挡住模型脚本的是 CSP，不是 sandbox
+
+`measure` 模式下 sandbox 已经给了脚本权限，模型脚本由注入的 CSP 挡着
+（`buildMeasuredDocument`）：
+
+```html
+<meta http-equiv="Content-Security-Policy" content="script-src 'nonce-<uuid>'">
+```
+
+nonce 由 `crypto.randomUUID()` 现场生成，只有测量脚本带它。
+`htmlAllowScripts: true` 时整条 CSP 被移除（`policy = allowScripts ? '' : …`），
+模型的脚本才会运行。默认是 `false`。
+
+### 7.3 其余措施
+
+- 表格视图用 DOM API 建节点，**不解析模型产出的标记**；
+- 表格行数列数有上限（500 行 × 40 列，单元格 400 字），超出截断；
+- **不提供"在新标签页打开"** —— 用 `blob:` URL 打开会以宿主同源执行，
+  绕开 iframe 提供的全部保证（[03-pitfalls.md](03-pitfalls.md) 末节）；
+- 已知的残留风险：**渲染一段内容就可以发起该内容的网络请求**，这一条在所有
+  配置下都成立，因为浏览器必须加载子资源才能排版。
 
 ---
 
-## 11. 渐进式演进路线
+## 8. 宿主半体
 
-| 阶段 | 新增内容 | 触及的层 | 状态 |
-|---|---|---|---|
-| v0 | Kit + 接缝 + HTML / SVG 渲染器 | 全部（基线） | ✅ 已实现 |
-| v0.1 | 数据表格渲染器（CSV / JSON 对象数组 / 管道表格） | **仅 L5** | ✅ 已实现 |
-| v0.2 | `html` 渲染器的脚本开关 / 高度设置 | L5 + 配置 | ✅ 已实现（§5.6） |
-| v0.3 | ECharts 渲染器（`echarts` 围栏 + JSON 嗅探） | L5 + 构建条目 | ✅ 已实现（引擎按需加载，见 §13.7） |
-| v0.4 | 高度封顶 + 放大控件（表格内滚 / HTML 弹窗） | L3 + L5 + 配置 | ✅ 已实现 |
-| v0.5 | 配置跨半区桥（`Config` schema + GET 路由） | Host 半体 + L2 | ✅ 已实现（§5.6） |
-| v0.6 | 代码高亮增强（扩展 DSH 的 shiki 语言表） | **仅 L5** | 计划 |
-| v1 | `viewer_render` 工具来源（§7.2） | L2 + Host 半体 + 一个 toolview | 计划 |
-| v1+ | 设置页（`settings.general.item`）+ 每会话开关 | 独立小模块 | 计划 |
+### 8.1 配置路由
 
-**每一行都只触及标注的那一层**，这是本架构存在的全部意义。
-v0.1 已经是这个说法的实证：新增数据表格渲染器时，
-`kit.js` / `dom-seam.js` / `code-block-surface.js` / `contract.js` 一行都没有改动，
-也没有新增任何 DOM 选择器或测试夹具。
+`src/index.js` 在 `apply` 里 `resolveConfig` 一次，然后注册一条
+`GET /dsh-viewer-kit/config`，`cache-control: no-store`。
+注册包在 `ctx.effect` 里 —— `webServer.register` 对同一 `(kind, path)` 直接抛，
+而 `effect` 立刻执行回调并把返回值当 disposer，路由因此在停用时被摘掉。
 
-> **但 v0.4 与 v0.5 各碰到了一次真边界**，值得记下来：
-> 放大控件需要"一个不属于任何视图的动作"，这在 §5.2 的契约里原本没有位置 —— 视图列表是
-> 互斥的，而放大不是视图。配置桥则碰到了 §5.6 那个空白。两处都是**先扩契约，再写实现**，
-> 而不是绕过契约。
+### 8.2 原型模式
 
----
-
-## 12. 已知风险
-
-| 风险 | 等级 | 缓解 |
-|---|---|---|
-| DSH 移除 `data-code-block-content` 钩子 | 中 | 选择器集中在 `dom-contract.js` + 逐块降级为 no-op（§6.5） |
-| DSH 改变 banner 内部结构导致读不到语言名 | 中 | 读不到即 `lang: ''`，交由渲染器内容嗅探；仍失配则不接管 |
-| React 与我们的追加节点发生协调冲突 | 低 | §6.4 的六条不变量 + `data-dvk-*` 标记便于事后自检 |
-| 预览页消耗过多内存（大量 iframe） | 低 | 只在用户切到预览时创建 iframe；切回代码立即移除节点（连带销毁浏览上下文） |
-| 用户禁用插件后残留 UI | 低 | 清理挂在 `ctx.effect` disposer 上（DSH 保证等待异步效果结束再驱逐） |
-| 安装方式被后续操作冲掉 | — | **已实测发生过并已修复**，见 §13.4 |
-
----
-
-## 13. 已被实证的部分
-
-写完代码之后，下面这些不是"应该可以"，而是实际验证过的：
-
-### 13.1 打包与激活
-
-包通过 `dsh plugin add file:<仓库路径>` 装进 profile 之后：
-
-- 它出现在 profile `package.json` 的 `dependencies` 与 `dsh.profile.bundles` 里；
-- 它的 `dsh.bundle.patch` 指向包内 `cordis.patch.yml`，由插件管理器生成 Loader 那一行；
-- `plugin_manager list_plugins` 显示
-  `include:dsh-viewer-kit / enabled: true / fiberPhase: "active"`；
-- 装进 profile 的 `client/client.js` 与本仓库构建产物 **SHA-256 完全一致**——
-  也就是说宿主 serve 的确实是我们构建的那份文件。
-
-### 13.2 零遮蔽
-
-激活后查询 `conversation.chat.node` 的 occupant 表，19 个原生 renderer 全部
-`registrant: "mf"`、`priority: 0`、`active: true`——**本插件一个 Slot 都没注册**。
-这不是"应该不影响"，是实时 Slot 表读出来的结果。
-
-### 13.3 产物与逻辑
-
-- 构建产物在一个假的 `__ModuleLoader__` 里成功注册、导出 `apply(ctx)`，
-  并对一个真实夹具走完了"接管 → 挂 iframe → 卸载复原"全流程。
-  这一步跑的是 **tsdown 产出的那份 `client/client.js`**，不是源码——
-  所以格式契约（banner/footer、`module`/`exports` 对、`[name].js` 命名）
-  被真实加载验证过，而不是"看代码觉得对"。
-- 40 项自动化测试全绿（`pnpm run check`：typecheck + tsdown build + tests）。
-  仓库用 `.node-version` 声明 Node 24；tsdown 需要 ≥ 22，而 `pnpm run` 用 PATH 上的
-  `node` 拉子进程，所以必须显式选版本（`fnm use` / `fnm exec --using=24 -- …`，
-  后者能把版本穿透到嵌套进程）。
-- `tsc --noEmit` 对 `src/**/*.js` 的 JSDoc 做检查，第一次跑就抓出了 5 个真实类型错误
-  （跨文件的 `ViewerKitConfig` 没有限定模块名、`iframe` 被标注成 `Element` 而丢掉了
-  `srcdoc`/`style`、`safeStorage()` 的返回类型声明与实现不符）。
-  这是引入标准工具链的直接收益。
-
-### 13.4 一次真实的翻车：手改 profile patch 撑不住
-
-最初是把包复制进 profile 的 `node_modules`、再手动往 profile 的
-`cordis.patch.yml` 末尾加一行 `insert`。DSH 立刻通过 `app-boot/config-reload`
-把它热加载了，`fiberPhase` 变成 `active`——看起来完全成功。
-
-**然后它消失了。** 后来有人在同一个 profile 上跑 `dsh plugin add`（装了
-`dsh-schedule-later`、升级了 `dshmarket`），整个 `cordis.patch.yml` 被重写，
-我那一行连同上下文一起没了，插件静默失效——既没有报错，也没有任何提示。
-
-> **教训**：热加载成功 ≠ 安装是持久的。Loader 的那一行是**生成物**，
-> 手改它就是在跟生成器赛跑。
->
-> 正确做法是让插件管理器成为唯一的写入者：包通过 `dsh plugin add` 进入
-> `dependencies` 和 `profile.bundles`，Loader 那一行变成可再生的派生物。
->
-> 安装步骤见 [README](../README.md) §2；`AGENTS.md` §3 记的是改动时的拷贝覆盖循环
-> （那条路不重装，因此也不碰这个生成物）。
-
-
-
-### 13.5 排查"装了但没渲染"：三个静默失败，与一次自我纠正
-
-用户报告"插件已使能，但会话里的 HTML 没渲染"。宿主 `/plugins` 路由对未认证请求一律 404
-（连乱写的路径也是），所以无法从命令行确认浏览器侧行为，只能靠 `window.__DSH_BOOT__`
-和控制台自检。排查中确认了三件事，其中一件推翻了我自己的判断：
-
-**1. 自研打包器是错的方向，已换成标准 tsdown 管线。**
-
-最初为了"零依赖"自己写了个 ESM→`__ModuleLoader__` 链接器。它能用，但它是**非标准**的：
-官方和社区插件都用 tsdown，格式契约应该由配置声明，而不是由我手写的
-正则变换保证。已删除 `scripts/build.mjs`，改用 `tsdown.config.ts`。
-第一次跑 `tsc --noEmit` 就抓出 5 个真实类型错误——这就是标准工具链的价值。
-
-**2. pnpm 是"拷贝"目录依赖，不是硬链接（我一开始判断错了）。**
-
-我一度认定是构建脚本 `rm -rf client/` 打断了硬链接。**那个判断是错的**，
-用追加探针标记的实验证伪了：改仓库里的 `client.js`，profile 里那份纹丝不动。
-真实原因是 pnpm **拷贝**目录依赖进 `node_modules`，所以
-
-> 改完代码后的正确流程是：`pnpm run build` → 重新安装 → 刷新页面。
-
-只构建不重装，profile 会一直 serve 上一次安装的内容，而且**任何地方都不报错**。
-`install_bundle` 在 lockfile 未变时会回 `Already up to date` 并拒绝重装，
-所以要真正同步，得 `remove_bundle` + `install_bundle` 或提升 `version`。
-
-**3. `data-chat-running` 流式守卫是死代码。**
-
-它挂在 `RunningStatus`（回合内容**之后**的指示器）上，是 flow item 的**兄弟节点
-而非祖先**，所以 `closest('[data-chat-running]')` 对代码块永远返回 `null`。
-流式保护实际靠的是内容节点的形态判据。已删除该守卫并补上了有界的兜底重试，
-在 `dom-contract.js` 留下记录说明它**不是**作用域标记。
-
-> 这三条都属于同一类问题：**失败是静默的**。所以补了两个控制台钩子：
-> `__DSH_VIEWER_KIT_BOOTED__`（bundle 被求值时打点，用来区分"bundle 根本没进 boot graph"
-> 和"进了但 `apply` 没被调用"）与 `__DSH_VIEWER_KIT__.diagnose()`（把
-> "没有代码块" / "没被认领" / "还没稳定" 三种情况分开，每种对应一个具体修法）。
-
-**仍未定论的**：`dsh-viewer-kit` 是否出现在 `window.__DSH_BOOT__.entries` 里。
-用户提供的快照中三个社区 bundle 都不在，而用户报告另外两个插件**工作正常**，
-因此那次快照很可能取自"本插件被 profile 重写冲掉、尚未重装"的时间窗。
-这个疑问后来被 §13.6 的崩溃日志**绕过**了：那条线索本身是对的，但根因在别处。
-
-### 13.6 真正的根因：`apply()` 抛异常，导致 DSH 启动崩溃
-
-用户报告"重启 dsh 就 crash，然后 `cordis.patch.yml` 被重置"。崩溃日志给出了判决：
-
-```
-Error: web boot: 1 entry did not activate
-dsh-viewer-kit: failed
-```
-
-前端 boot 审计的判定逻辑（`dsh-web-frontend/dist/assets/index-*.js`）是：
-
-```js
-if (entry.fiber === undefined) → `${name}: import failed: ${importError.message}`
-const state = A7[entry.fiber.state]
-if (state !== 'active')        → `${name}: ${state}`
-```
-
-日志只有 `dsh-viewer-kit: failed`，**没有** `import failed: …` —— 所以不是传输/导入失败：
-bundle 加载了、factory 跑了、entry 建起来了，**然后 `apply(ctx)` 抛了异常**。
-DSH 把这个失败当成致命启动错误；而"patch 被重置"正是 **DSH 自己的启动失败恢复**，
-不是别人跑了 `dsh plugin add`——我之前那个判断也是错的。
-
-**三个 bug，都是同一个错误的世界观造成的：我以为 `ctx` 是个宽松的对象、
-`ctx.effect` 是个"注册清理"的容器。** 真实契约窄得多，而且严格得多：
-
-| # | 症状 | 真因 |
-|---|---|---|
-| 1 | **DSH 崩溃** | `ctx.MutationObserver` —— `ctx` 是 proxy，读未注册成员**直接抛**。builtin 文档原话就是"prefer `ctx.get(name)` with an undefined check"。 |
-| 2 | 什么都没渲染 | `ctx.effect(dispose, label)` —— `effect` **立刻调用**回调，并把**返回值**当 disposer。我传的是已经写好的 `dispose`，于是插件在激活瞬间把自己拆干净了（`__DSH_VIEWER_KIT__` 因此是 `undefined`）。 |
-| 3 | 即使不崩也不渲染 | `locale.bind(ns).t(key)` —— `bind` 返回的就是翻译函数本身（`t = ctx.locale.bind(NS); t('key')`），不是带 `.t` 的对象。这个 TypeError 被接缝的逐块 try/catch 吞掉，看起来和"没有渲染器认领"一模一样。 |
-
-**为什么我自己的测试没抓到**：我给 `apply` 喂的是一个**宽松的** `ctx` stub ——
-任意属性都返回 `undefined`，`effect` 只是把回调存起来不调用。
-真正运行时的三个约束（未注册成员抛错、`effect` 立即执行、`bind` 的返回形状）
-一个都没建模。**测试通过只证明测试的模型是对的，不证明产品是对的。**
-
-**修法与防线**：
-
-1. 对 `ctx` 的依赖压到只剩两个成员：`ctx.get(name)` 与 `ctx.effect(cb)`。
-   `document` / `console` / `MutationObserver` 一律走浏览器全局；
-   样式表自己插 `<style data-plugin="dsh-viewer-kit">` 并在 disposer 里移除
-   （这正是官方 UI 包的做法），不再依赖来路不明的 `styles` 助手。
-2. 新增 `tests/ctx-harness.mjs`：一个**严格**的客户端上下文 ——
-   proxy 读未注册成员即抛、`effect` 立即执行且要求回调返回 disposer、
-   `locale.get('locale')` 用真实 locale 注册表的语义（含它的两个 throw）。
-   任何违反都会变成测试失败，而不是线上崩溃。
-3. `tests/repro-activation.mjs`（`pnpm run repro`）用同一套 harness 跑**构建产物**，
-   失败时打印栈 —— 因为崩溃日志里只有 `<name>: failed`，真正的栈只进浏览器控制台。
-4. `pnpm run check` = typecheck + build + 126 项测试 + repro + 宿主契约探针，全部必须绿。
-
-> **教训**：写插件的"接口"部分时，**先读契约，再写代码**。
-> 宽松的 stub 是比没有测试更坏的东西 —— 它给出虚假的安全感。
-
----
-
-### 13.7 宿主契约探针：把"没文档的假设"变成会红的检查
-
-本插件有三处依赖 DSH **没有公开文档**的事实：
-
-- 客户端模块系统接受的 on-demand chunk 文件名规则（`/^client\.[A-Za-z0-9][A-Za-z0-9._-]*\.js$/`）
-- 工厂用什么请求 chunk（`require.async`）
-- 缺失 bundle 时的具名错误（`MissingClientBundleError`）
-
-它们一旦被 DSH 升级改掉，**失败方式不是报错，而是图表静默不画**。只写在注释里等于没有。
-
-`tools/probe-host.mjs` 直接读安装目录里的 `app.asar`，把
-`@deepseek-ai/dsh-client-modules` 的**真实产物**当事实来源，核 8 条契约。
-它不需要 Electron 就能跑：一个 asar 就是「16 字节头 + JSON 目录树 + 内容」，
-写个几十行的读取器足够。头部的坑记在 `tools/README.md`：`DATA_BASE = 8 + headerSize`，
-**不是** `16 + headerSize` —— 差 8 字节会让每个文件都读到前一个文件的尾巴，
-小文件直接被截断，而大文件看起来完全正常。
-
-**探针自己必须有负向测试**（`tests/probe-host.mjs`）：每条检查都有一个"改坏的宿主"能让它变红，
-外加一条"忠实宿主必须全绿" —— 没有后者，一个永远失败的探针也能满足全部负向测试。
-探针找不到 DSH 时 **SKIP 而非通过**，输出里也不会出现 `assumptions confirmed` 字样。
-
-其中一条是**故意埋的绊子**：
-
-```
-the boot wire still carries no config, so P0 is still open
-```
-
-它核的是 §5.6 那件事 —— 线缆不带配置。**DSH 哪天加了，这条会红，那天应该删掉整条 HTTP 桥，
-直接读行配置。** 一个只在"该重构时"才会响的检查，比注释里的 TODO 可靠，因为它挡在 CI 上。
-
----
-
-## 14. 原型模式：一次性风格注入
-
-§4 那套分层是**浏览器**里的。本节的东西全在**宿主半体**，在渲染发生之前就作用在
-模型身上 —— 它不改任何被渲染的字节，改的是模型**写**出来的东西。
-
-### 14.0 为什么是 `src/tools/`
-
-这个仓库原本只有一类东西：往会话里**画**东西。现在多了一类：往模型的回合循环里
-**注入**东西。两者是不同的扩展点，值得各自一个目录，于是：
-
-```
-src/client/renderers/    插件 → DSH 的渲染扩展点（浏览器侧）
-src/tools/               插件 → DSH 的工具 / 提示词扩展点（宿主侧）
-```
-
-同一个"角色分组"的词汇，两边对称。文件名跟着**它注册的工具**走
-（`apply-prototype-style.js` ↔ `apply_prototype_style`），和 `renderers/html.js` ↔ html 渲染器
-一个规矩。
-
-注意它**不是**自动发现的：`src/index.js` 显式 import，隐式约定在这里不管用 ——
-`renderers/` 同样不扫描（见 §4 的 `RENDERER_FACTORIES`）。目录表达的是"同类聚合"，
-不是"加了文件就跑"。
-
-### 14.1 问题
-
-"把这段沟通做成 HTML 原型"要的是 Mockplus 式低保真稿：黑白灰、无阴影、无框架。
-但这个约束没有别的办法塞给模型：会话已经开始了，历史里没有这条规则，
-而**每一轮重新说一遍**等于把对话变成不断自我重复。
-
-### 14.2 状态归谁管
-
-直觉做法是注册两个工具，一个开一个关。**这让提示词段落的生命周期变成模型要记得做的事，
-而一个忘了关的模型会把风格约束焊死在之后每一轮对话里。**
-
-所以模型只负责开。状态归段落自己的 `text` 函数管：
+`apply_prototype_style` 工具翻转一个 `armed` 标志；`systemPrompt.section()` 的
+`text` 每次组装请求前执行：
 
 ```js
 text: () => {
-  if (!armed) return ''      // 组装器丢弃空段落 —— 未武装时零 token、一次分支
+  if (!armed) return ''      // 组装器丢弃空段落 —— 未武装时零 token
   armed = false              // 在返回的路上清掉，不是之后清
   return spec
 }
 ```
 
-`systemPrompt.section()` 的 `text` 每次组装请求前都会执行。所以"关闭"这件事
-**根本不存在于模型的动词表里**，也就没有忘记关的可能。工具只翻转标志位，
-工具描述里明确告诉模型"到期自动失效，你不需要做任何事"—— 否则模型会自己发明一个
-退出工具。
+状态归段落自己管，**关闭这件事不存在于模型的动词表里**，也就没有忘记关的可能。
+工具描述里明确告诉模型到期自动失效，否则模型会自己发明一个退出工具。
 
-对应的失败模式：**被中止的工具调用会把标志留在武装态**，而下一次无关的组装消费掉它。
-这是一次后一轮里多出来的规范，不是永不消失的段落。这是"不信任模型自我清理"的直接代价，
-而且是划算的那一边。
+`order: 50` 落在宿主的 `DEPLOYMENT_PERSONA_PREFIX`（0）与 `PLAN_POLICY`（500）
+之间、工具引导（从 `TOOL_BASH: 1000` 起）之前，由一条测试守住 `0 < order < 500`。
+**这三个宿主常量没有任何探针覆盖**，DSH 往 `0..500` 塞新段落时需要重新核对。
 
-### 14.3 为什么顺序是裸数字 50
+工具不实现 `isConcurrencySafe`，即声明为独占：它翻转的状态由紧接着的那次组装
+读取，两次调用不能交错。
 
-`PromptSection.order` 是有限数值，没有名字可查。宿主的命名放置点里
-`DEPLOYMENT_PERSONA_PREFIX` 是 `0`、`PLAN_POLICY` 是 `500`、工具引导从
-`TOOL_BASH: 1000` 开始 —— 所以 50 落在「persona 之后、工具引导之前」的空档里，
-这条约束被一条测试守着（`order > 0 && order < 500`）。
+`prototypeStyle` 的默认是 `''` 而不是那 27 行规范，空串表示"用内置的"，
+这样解析后的配置保持一个短标量 —— 它会原样发上配置路由，也会被打印在一行
+启动日志上。它会随配置发到浏览器，但没有任何渲染器读它。
 
-这是本节唯一一个**宿主升级可能作废**的值。哪天有宿主往 `0..500` 塞了新段落，
-该重新核对位置而不是假定它还成立。
+---
 
-### 14.4 为什么工具没有 `isConcurrencySafe`
+## 9. 验证手段
 
-`tools.executionMode` 的契约是：**只有精确 `true` 才算并行，其余一律独占**。
-不实现这个方法即独占 —— 而这正是这里需要的：工具翻转的状态由**紧接着的那次组装**读取，
-两次调用不能彼此交错。
+| 层 | 手段 |
+|---|---|
+| L4 内核 | 纯 Node 单测，无 DOM 依赖 |
+| L1 / L3 | 从 DSH 发行包抄下来的真实 DOM 片段做夹具，跑在 `tests/dom-shim.mjs` 上 |
+| L5 | 每个渲染器自带夹具与断言 |
+| 构建产物 | `pnpm run repro` 把 `client/client.js` 塞进一个假的 `__ModuleLoader__` 里真跑一遍 |
+| 宿主契约 | `pnpm run probe` 读本机 `app.asar`，核 8 组假设 |
+| 探针自身 | `pnpm run probe:test` —— 每条检查都有一个"改坏的宿主"能让它变红，外加一条"忠实宿主必须全绿" |
 
-### 14.5 规范文本放在字段表旁边
+`pnpm run check` = typecheck + build + test + repro + probe:test + probe。
 
-`prototypeStyle` 的默认值是 `''`，**不是**那 40 行规范。空串表示"用内置的"。
-
-这让解析后的配置保持一个短标量 —— 它会原样发上 `CONFIG_ROUTE`，也会被打印在一行启动日志上，
-四十行转义字符串会污染两者，`patchDocumentation` 还会把同一堆东西塞进 `cordis.patch.yml`。
-代价是"空 = 内置"这条规则得讲一次，字段的 `doc` 和 README 都讲了。
-
-内置规范原文作为 `DEFAULT_PROTOTYPE_STYLE` 导出，紧挨字段表 —— 它是那个配置键的
-**默认值**，不是对它的第二份描述，所以按 §4.3 它属于 `src/schema.js`。
-
-### 14.6 它是宿主半体，客户端看不见
-
-`prototypeStyle` 会随配置发到浏览器，但没有任何渲染器读它，客户端重新解析时直接丢弃。
-这不是疏漏：**这个功能在浏览器里没有任何对应物**，`ViewerKitConfig` 里那条属性注释
-写明了 host-only。
+**覆盖范围**：文档守卫只扫 `README.md` 与 `AGENTS.md`。`docs/` 不在扫描范围内，
+所以本文的行号与语义断言没有任何自动核对 —— 升级 DSH 或改动源码后，
+本文需要人工回校。探针找不到 DSH 时 SKIP 而非通过，输出里不会出现
+`assumptions confirmed`。
