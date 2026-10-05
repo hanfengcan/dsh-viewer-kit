@@ -526,6 +526,12 @@ export function createHtmlRenderer(t) {
 
         enter(viewId) {
           if (viewId === 'code') {
+            // The dialog is on `document.body`, so it outlives the view root this
+            // switch empties — the same reason `dispose` closes it. Leaving it
+            // open would put a modal over a block showing its source, and the
+            // enlarge control is hidden in this view, so nothing on screen would
+            // say a dialog is still there.
+            closeDialog()
             destroyFrame()
             return
           }

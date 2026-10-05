@@ -158,11 +158,13 @@ export const FOLLOWING_TAIL_SELECTOR = '[data-chat-following-tail]'
  *    scroll gesture is in flight, and the seam claims blocks from a
  *    `MutationObserver` callback, which is mid-gesture by construction.
  *
- * (2) and (3) together are why a resize away from the viewport displaces the
- * content the reader is looking at by the full height delta, with nothing to
- * put it back. `scroll-guard.js` is what puts it back; it is deliberately a
- * no-op for a block inside the viewport, and for a list pinned to its end,
- * which the host re-derives from the total size itself.
+ * (2) and (3) together are why a resize displaces the content the reader is
+ * looking at by the full height delta, with nothing to put it back.
+ * `scroll-guard.js` is what puts it back, and it is deliberately inert in the
+ * two cases where nothing moved: a block whose bottom edge sits below the
+ * reading line — the reader is on the block or above it, and neither of those
+ * moves — and a list the host is pinning to its end, which it re-derives from
+ * the total size itself.
  */
 
 /**

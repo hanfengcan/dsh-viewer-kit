@@ -205,7 +205,7 @@ cordis.patch.yml ─▶ apply(ctx, config) ─▶ Config schema 校验
 ```
 
 **接缝整体推迟到配置落地之后**：`createDomSeam` 在**构造时**就挂上
-MutationObserver（`dom-seam.js:460`），所以推迟的不是一个 `scan()` 调用，
+MutationObserver（`dom-seam.js:481`），所以推迟的不是一个 `scan()` 调用，
 是整个接缝。首屏因此就是最终结果。
 
 配置在两侧各存一份，两份都不自己更新：
@@ -368,13 +368,21 @@ value = 'code' | 渲染器自定义 viewId
 | React 换掉了 banner 子树 | `childList` 记录的 target 向上找块再 `evaluate` |
 | 块被移除 | `dispose`，从索引里删除 |
 
+**只向上找块，从不评估记录本身的 target。** target 落在块外的那次变更没有可认领的
+东西，而 `evaluate` 对读不懂的元素只有一种回答 —— 排一次重试 —— 于是消息容器会被
+塞进那三个强引用 Map 并在 30s 里被重查一百次。块稍后出现在同一容器里时，它自己会
+作为 `addedNodes` 记录到达，那才是能认领它的路径。
+
 索引 `surfaces` 是 `WeakMap<Element, { dispose, bytes }>`。
 `quietTimers` / `retryCounts` / `arrivals` 是三个**强引用** `Map`，
-`dispose()` 会清空它们。
+`dispose()` 会清空它们，**移除一个块也会把它那三条清掉** —— 认没认领都一样。
+三个 Map 以 `Element` 为键，所以一个从未被认领就被回收的块，会连它的整棵子树
+（源码文本在内）一起被留到会话结束，外加一个还瞄着看不见的节点的定时器。
+回收的行带的是新节点，必须从干净的预算重新开始。
 
 ### 5.2 已认领块的再评估
 
-`surfaces.has(element)` 时（`dom-seam.js:299-322`），认领只在**两个条件同时成立**
+`surfaces.has(element)` 时（`dom-seam.js:306-329`），认领只在**两个条件同时成立**
 时保留：
 
 ```
@@ -388,7 +396,7 @@ readSource(content).length === claimed.bytes   ← 源码还是认领时那一�
 
 ### 5.3 认领门
 
-`evaluate` 的判断顺序（`dom-seam.js:297-368`）：
+`evaluate` 的判断顺序（`dom-seam.js:304-375`）：
 
 ```
 disposed                                  → 直接返回
@@ -416,7 +424,7 @@ generic = isGenericLabel(label)
 **③ 真标签 + plain 正文** —— 宿主给了一个它不打算高亮的语言名，形态永不改变。
 只有这一支等 `hasSettled`。
 
-`hasSettled`（`dom-seam.js:259-273`）：
+`hasSettled`（`dom-seam.js:266-280`）：
 
 ```
 bytes = source.length                      （UTF-16 code unit，不是字节）
@@ -434,7 +442,7 @@ now - seen.since < SETTLE_QUIET_MS         → false        （= PLAIN_SETTLE_MS
 
 ### 5.4 重试预算
 
-`schedule`（`dom-seam.js:408-422`）在 `PLAIN_SETTLE_MS`（300ms）后重跑
+`schedule`（`dom-seam.js:415-429`）在 `PLAIN_SETTLE_MS`（300ms）后重跑
 `evaluate`，次数上限 `MAX_QUIET_RETRIES`（100，约 30s）。同一个元素已有定时器时
 不重复排。
 

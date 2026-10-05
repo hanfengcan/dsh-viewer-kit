@@ -303,7 +303,7 @@ process.stdout.write('\nseam (fixture DOM)\n')
  * configured the way the client half configures it.
  *
  * @param {string} html
- * @param {{ config?: Record<string, unknown>, storage?: ShimStorage | null, renderers?: object[], layout?: { scrollHeight: number, clientHeight: number }, layoutOf?: (env: any) => void }} [options]
+ * @param {{ config?: Record<string, unknown>, storage?: ShimStorage | null, renderers?: object[], layout?: { scrollHeight: number, clientHeight: number }, layoutOf?: (env: any) => void, timers?: { setTimeout?: typeof setTimeout, clearTimeout?: typeof clearTimeout } }} [options]
  */
 function mount(html, options = {}) {
   const env = createEnvironment()
@@ -328,6 +328,7 @@ function mount(html, options = {}) {
     document: env.document,
     root: env.document.body,
     MutationObserver: env.MutationObserver,
+    ...options.timers,
   })
   seam.scan()
   return { env, kit, seam }
@@ -573,6 +574,38 @@ await test('a block removed from the conversation is cleaned up', async () => {
   node.remove()
   await tick()
   eq(env.document.querySelectorAll('[data-dvk-switch]').length, 0, 'removed with the block')
+})
+
+await test('a block removed while still arriving leaves no retry timer behind', async () => {
+  // A virtual list takes rows away without warning, and a row that is still
+  // streaming was never claimed — so the removal path that disposes a surface
+  // never ran for it at all. What it left was a live timer plus three maps
+  // keyed by `Element`, which hold the detached block's whole subtree. The timer
+  // is the half a test can see: it would fire `evaluate` on a node nothing can
+  // reach, once per row, for as long as the conversation stays open.
+  //
+  // The timer is captured rather than awaited, because waiting for it to expire
+  // is exactly what makes this failure invisible — by then it has fired and
+  // cleaned itself up.
+  const armed = new Set()
+  const { env } = mount(
+    conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p>part', streaming: true }) }]),
+    {
+      timers: {
+        setTimeout: (fn) => {
+          armed.add(fn)
+          return fn
+        },
+        clearTimeout: (fn) => {
+          armed.delete(fn)
+        },
+      },
+    },
+  )
+  eq(armed.size, 1, 'a block that has not settled is waiting on exactly one retry')
+  block(env.document).remove()
+  await tick()
+  eq(armed.size, 0, 'and removing it cancels that retry whether it was claimed or not')
 })
 
 await test('two blocks in one conversation are tracked independently', () => {
@@ -1245,6 +1278,20 @@ await test('closing the enlarged dialog leaves the conversation exactly as it wa
   await tick()
   eq(env.document.querySelector('dialog'), null, 'a removed block does not leave a dialog behind')
   eq(env.document.openDialogs, 0, 'nor leave the page inert')
+})
+
+await test('switching to code closes the enlarged dialog instead of leaving it over the block', () => {
+  // The dialog hangs off `document.body` so that a recycled block cannot orphan
+  // it — which also means no view switch reaches it. The enlarge control is
+  // hidden on the code view, so a dialog left open there is a modal covering the
+  // app with nothing on screen to explain it or dismiss it.
+  const { env } = mount(conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) }]))
+  click(expandButton(env.document))
+  assert(env.document.querySelector('dialog') !== null, 'the preview is enlarged')
+  click(switcher(env.document).children[1])
+  eq(content(env.document).getAttribute('data-dvk-mode'), 'code', 'the block went back to its source')
+  eq(env.document.querySelector('dialog'), null, 'and took the dialog with it')
+  eq(env.document.openDialogs, 0, 'so the top layer was released and the page is interactive')
 })
 
 await test('the enlarge control is a sibling of the view switch, not one of its views', () => {

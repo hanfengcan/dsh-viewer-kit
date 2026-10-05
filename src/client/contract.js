@@ -157,10 +157,10 @@
  * @property {boolean} [defaultToPreview] Open a freshly seen item in its
  *   enhanced view instead of the code view. **On by default.**
  * @property {string} [prototypeStyle] Style specification injected for the one
- *   response after the `apply_prototype_style` tool fires. **Host-only** — no
- *   renderer reads it, and the client drops it when re-resolving. `''` is a real
- *   value meaning "use the shipped specification", not "unset"; see
- *   `src/schema.js`.
+ *   response after the `apply_prototype_style` tool fires. **Host-only**: it is
+ *   no field of `RenderRequest`, so `createRequest` cannot hand it to a
+ *   renderer even by accident. `''` is a real value meaning "use the shipped
+ *   specification", not "unset"; see `src/schema.js`.
  */
 
 /** The view every surface always offers, rendered by the host itself. */

@@ -264,10 +264,10 @@ const FOLLOWING_TAIL_SELECTOR = "[data-chat-following-tail]";
 * @property {boolean} [defaultToPreview] Open a freshly seen item in its
 *   enhanced view instead of the code view. **On by default.**
 * @property {string} [prototypeStyle] Style specification injected for the one
-*   response after the `apply_prototype_style` tool fires. **Host-only** — no
-*   renderer reads it, and the client drops it when re-resolving. `''` is a real
-*   value meaning "use the shipped specification", not "unset"; see
-*   `src/schema.js`.
+*   response after the `apply_prototype_style` tool fires. **Host-only**: it is
+*   no field of `RenderRequest`, so `createRequest` cannot hand it to a
+*   renderer even by accident. `''` is a real value meaning "use the shipped
+*   specification", not "unset"; see `src/schema.js`.
 */
 /** The view every surface always offers, rendered by the host itself. */
 const CODE_VIEW = Object.freeze({
@@ -941,6 +941,8 @@ function readSource(content) {
 *   root?: ParentNode,
 *   document?: Document,
 *   MutationObserver?: { new (callback: (records: object[]) => void): { observe: (target: unknown, options: object) => void, disconnect: () => void } },
+*   setTimeout?: typeof setTimeout,
+*   clearTimeout?: typeof clearTimeout,
 *   onError?: (error: unknown) => void,
 * }} options
 * @returns {{ scan: () => void, dispose: () => void, size: () => number, diagnose: () => object }}
@@ -950,6 +952,8 @@ function createDomSeam(options) {
 	const doc = options.document ?? globalThis.document;
 	const root = options.root ?? doc.body;
 	const Observer = options.MutationObserver ?? globalThis.MutationObserver;
+	const later = options.setTimeout ?? setTimeout;
+	const cancel = options.clearTimeout ?? clearTimeout;
 	const t = options.t ?? ((_key, fallback) => fallback);
 	const onError = options.onError ?? ((error) => {
 		console.error("[dsh-viewer-kit] seam", error);
@@ -1104,7 +1108,7 @@ function createDomSeam(options) {
 				bytes: source.length
 			});
 			const timer = quietTimers.get(element);
-			if (timer !== void 0) clearTimeout(timer);
+			if (timer !== void 0) cancel(timer);
 			quietTimers.delete(element);
 			retryCounts.delete(element);
 			arrivals.delete(element);
@@ -1129,7 +1133,7 @@ function createDomSeam(options) {
 		const attempts = (retryCounts.get(element) ?? 0) + 1;
 		if (attempts > 100) return;
 		retryCounts.set(element, attempts);
-		quietTimers.set(element, setTimeout(() => {
+		quietTimers.set(element, later(() => {
 			quietTimers.delete(element);
 			evaluate(element);
 		}, 300));
@@ -1150,15 +1154,18 @@ function createDomSeam(options) {
 			for (const node of record.removedNodes) {
 				if (node.nodeType !== 1) continue;
 				const element = node;
-				const surface = surfaces.get(element);
-				if (surface !== void 0) {
-					surface.dispose();
-					surfaces.delete(element);
-					arrivals.delete(element);
-					retryCounts.delete(element);
-				}
+				surfaces.get(element)?.dispose();
+				surfaces.delete(element);
+				const timer = quietTimers.get(element);
+				if (timer !== void 0) cancel(timer);
+				quietTimers.delete(element);
+				retryCounts.delete(element);
+				arrivals.delete(element);
 			}
-			if (record.type === "childList" && record.target?.nodeType === 1) evaluate(record.target.closest(".md-code-block") ?? record.target);
+			if (record.type === "childList" && record.target?.nodeType === 1) {
+				const owner = record.target.closest(CODE_BLOCK_SELECTOR);
+				if (owner !== null) evaluate(owner);
+			}
 		}
 	});
 	observer.observe(root, {
@@ -1236,7 +1243,7 @@ function createDomSeam(options) {
 			if (disposed) return;
 			disposed = true;
 			observer.disconnect();
-			for (const timer of quietTimers.values()) clearTimeout(timer);
+			for (const timer of quietTimers.values()) cancel(timer);
 			quietTimers.clear();
 			retryCounts.clear();
 			arrivals.clear();
@@ -1305,7 +1312,8 @@ function createDomSeam(options) {
 * The option falls back to `''` rather than to this string. That keeps the
 * resolved config — which is published verbatim over `CONFIG_ROUTE` and printed
 * on one startup line — a single short scalar, and keeps `patchDocumentation`
-* from emitting forty escaped lines into `cordis.patch.yml`. The cost is that
+* from emitting the whole specification as escaped lines into
+* `cordis.patch.yml`. The cost is that
 * "empty means shipped" is a rule the reader has to be told once; the field's
 * `doc` and the README both say it.
 *
@@ -2296,6 +2304,7 @@ function createHtmlRenderer(t) {
 				},
 				enter(viewId) {
 					if (viewId === "code") {
+						closeDialog();
 						destroyFrame();
 						return;
 					}

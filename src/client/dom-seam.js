@@ -171,6 +171,8 @@ export function readSource(content) {
  *   root?: ParentNode,
  *   document?: Document,
  *   MutationObserver?: { new (callback: (records: object[]) => void): { observe: (target: unknown, options: object) => void, disconnect: () => void } },
+ *   setTimeout?: typeof setTimeout,
+ *   clearTimeout?: typeof clearTimeout,
  *   onError?: (error: unknown) => void,
  * }} options
  * @returns {{ scan: () => void, dispose: () => void, size: () => number, diagnose: () => object }}
@@ -180,6 +182,11 @@ export function createDomSeam(options) {
   const doc = options.document ?? globalThis.document
   const root = options.root ?? doc.body
   const Observer = options.MutationObserver ?? globalThis.MutationObserver
+  // The retry timer is the seam's only clock, so it is injected for the same
+  // reason `MutationObserver` is: what it does when nobody advances time is the
+  // part a test has to be able to see. `host-config.js` takes the same pair.
+  const later = options.setTimeout ?? setTimeout
+  const cancel = options.clearTimeout ?? clearTimeout
   const t = options.t ?? ((_key, fallback) => fallback)
   const onError =
     options.onError ??
@@ -384,7 +391,7 @@ export function createDomSeam(options) {
       }
       surfaces.set(element, { dispose: surface.dispose, bytes: source.length })
       const timer = quietTimers.get(element)
-      if (timer !== undefined) clearTimeout(/** @type {any} */ (timer))
+      if (timer !== undefined) cancel(/** @type {any} */ (timer))
       quietTimers.delete(element)
       retryCounts.delete(element)
       arrivals.delete(element)
@@ -413,7 +420,7 @@ export function createDomSeam(options) {
     quietTimers.set(
       element,
       /** @type {any} */ (
-        setTimeout(() => {
+        later(() => {
           quietTimers.delete(element)
           evaluate(element)
         }, PLAIN_SETTLE_MS)
@@ -438,21 +445,35 @@ export function createDomSeam(options) {
       for (const node of record.removedNodes) {
         if (node.nodeType !== 1) continue
         const element = /** @type {Element} */ (node)
-        const surface = surfaces.get(element)
-        if (surface !== undefined) {
-          surface.dispose()
-          surfaces.delete(element)
-          // The block is gone, so its "still arriving" bookkeeping goes with it.
-          // A recycled row reuses neither the node nor the answer.
-          arrivals.delete(element)
-          retryCounts.delete(element)
-        }
+        surfaces.get(element)?.dispose()
+        surfaces.delete(element)
+        // Every kind of bookkeeping goes with the block, claimed or not. The
+        // three maps are keyed by `Element` and hold strong references, so a
+        // pending block that leaves the conversation without being claimed would
+        // otherwise keep its whole subtree — source text included — reachable
+        // for the rest of the session, plus a retry timer still aimed at a node
+        // the reader cannot see. A recycled row brings its own node and must
+        // start from a clean budget.
+        const timer = quietTimers.get(element)
+        if (timer !== undefined) cancel(timer)
+        quietTimers.delete(element)
+        retryCounts.delete(element)
+        arrivals.delete(element)
       }
       // A React swap replaces the subtree without an add/remove we can key
-      // on; re-evaluate anything the record touched. `nodeType` rather than
+      // on; re-evaluate the block the record touched. `nodeType` rather than
       // `instanceof Element` so the check holds across realms too.
+      //
+      // The enclosing BLOCK, never the raw target. A record whose target sits
+      // outside every block describes a mutation with nothing to claim, and
+      // `evaluate` has exactly one answer for an element it cannot read — it
+      // schedules a retry — which would park a message wrapper in three maps and
+      // re-check it a hundred times over half a minute, for nothing. A block
+      // that shows up in that container arrives as an `addedNodes` record of its
+      // own, which is the path that can actually claim it.
       if (record.type === 'childList' && record.target?.nodeType === 1) {
-        evaluate(record.target.closest(CODE_BLOCK_SELECTOR) ?? record.target)
+        const owner = record.target.closest(CODE_BLOCK_SELECTOR)
+        if (owner !== null) evaluate(owner)
       }
     }
   })
@@ -536,7 +557,7 @@ export function createDomSeam(options) {
       if (disposed) return
       disposed = true
       observer.disconnect()
-      for (const timer of quietTimers.values()) clearTimeout(/** @type {any} */ (timer))
+      for (const timer of quietTimers.values()) cancel(/** @type {any} */ (timer))
       quietTimers.clear()
       retryCounts.clear()
       arrivals.clear()
