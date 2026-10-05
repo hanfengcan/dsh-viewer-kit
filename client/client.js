@@ -973,13 +973,66 @@ function createDomSeam(options) {
 			})
 		};
 	}
-	/** @type {WeakMap<Element, { dispose: () => void }>} */
+	/** @type {WeakMap<Element, { dispose: () => void, bytes: number }>} */
 	const surfaces = /* @__PURE__ */ new WeakMap();
 	/** @type {Map<Element, number>} */
 	const quietTimers = /* @__PURE__ */ new Map();
 	/** @type {Map<Element, number>} */
 	const retryCounts = /* @__PURE__ */ new Map();
+	/**
+	* The last source length seen per block, and when it was first seen at that
+	* length. This is the whole streaming test — see `hasSettled`.
+	*
+	* @type {Map<Element, { bytes: number, since: number }>}
+	*/
+	const arrivals = /* @__PURE__ */ new Map();
 	let disposed = false;
+	/**
+	* How long a block's source must hold still before it counts as finished.
+	*
+	* TWO quiet periods, not one. One observation cannot tell a finished fence
+	* from a model that has paused to think, and guessing "finished" there mounts
+	* a preview of a half-written document. Two consecutive unchanged checks are
+	* what turn the absence of change into a decision rather than a coincidence —
+	* and the number is derived from the existing quiet period rather than
+	* invented, so the delay stays a small multiple of the retry cadence instead
+	* of a new constant that only means something here.
+	*/
+	const SETTLE_QUIET_MS = 300 * 2;
+	/**
+	* Has this block stopped changing?
+	*
+	* A `<pre>` body is only a PROXY for "the fence has closed", and a proxy that
+	* is wrong in both directions: a live stream and a finished fence can share
+	* the shape, so waiting for the highlighter's `<div class="shiki">` wrapper
+	* waits forever for a fence the host never re-renders, and the block is
+	* abandoned once the retry budget runs out.
+	*
+	* Content cannot lie in the same way. A fence that is still arriving grows on
+	* every token, so its length changes; a fence that is done stops changing. So
+	* "unchanged for two quiet periods" IS the condition, and it is checked here
+	* rather than inferred from a shape the host may never change.
+	*
+	* @param {Element} element
+	* @param {string} source
+	* @returns {boolean}
+	*/
+	function hasSettled(element, source) {
+		const bytes = source.length;
+		const seen = arrivals.get(element);
+		const now = Date.now();
+		if (seen === void 0 || seen.bytes !== bytes) {
+			arrivals.set(element, {
+				bytes,
+				since: now
+			});
+			retryCounts.delete(element);
+			return false;
+		}
+		if (now - seen.since < SETTLE_QUIET_MS) return false;
+		arrivals.delete(element);
+		return true;
+	}
 	/**
 	* Are the nodes this plugin injected into a block still on the page?
 	*
@@ -1004,9 +1057,11 @@ function createDomSeam(options) {
 	function evaluate(element) {
 		if (disposed) return;
 		if (surfaces.has(element)) {
-			if (ownsInjection(element)) return;
+			const content = element.querySelector(CONTENT_SELECTOR);
+			const claimed = surfaces.get(element);
+			if (ownsInjection(element) && content !== null && readSource(content).length === claimed.bytes) return;
 			try {
-				surfaces.get(element)?.dispose();
+				claimed?.dispose();
 			} catch {}
 			surfaces.delete(element);
 		}
@@ -1023,7 +1078,7 @@ function createDomSeam(options) {
 		}
 		const label = readLang(element);
 		const generic = isGenericLabel(label);
-		if (!generic && settleState(content).reason !== "highlighted") {
+		if (!generic && settleState(content).reason !== "highlighted" && !hasSettled(element, source)) {
 			schedule(element);
 			return;
 		}
@@ -1044,11 +1099,15 @@ function createDomSeam(options) {
 				schedule(element);
 				return;
 			}
-			surfaces.set(element, surface);
+			surfaces.set(element, {
+				dispose: surface.dispose,
+				bytes: source.length
+			});
 			const timer = quietTimers.get(element);
 			if (timer !== void 0) clearTimeout(timer);
 			quietTimers.delete(element);
 			retryCounts.delete(element);
+			arrivals.delete(element);
 		} catch (error) {
 			onError(error);
 		}
@@ -1095,6 +1154,8 @@ function createDomSeam(options) {
 				if (surface !== void 0) {
 					surface.dispose();
 					surfaces.delete(element);
+					arrivals.delete(element);
+					retryCounts.delete(element);
 				}
 			}
 			if (record.type === "childList" && record.target?.nodeType === 1) evaluate(record.target.closest(".md-code-block") ?? record.target);
@@ -1178,6 +1239,7 @@ function createDomSeam(options) {
 			for (const timer of quietTimers.values()) clearTimeout(timer);
 			quietTimers.clear();
 			retryCounts.clear();
+			arrivals.clear();
 			for (const element of root.querySelectorAll(CODE_BLOCK_SELECTOR)) surfaces.get(element)?.dispose();
 		}
 	};

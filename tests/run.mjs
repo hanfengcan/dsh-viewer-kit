@@ -651,6 +651,46 @@ await test('a streaming block is taken over when it settles, with no rescan need
   eq(seam.size(), 1, 'the observer picked it up on its own')
 })
 
+await test('a fence the host leaves plain is still taken over, because its content went quiet', async () => {
+  // The shape says `plain` forever: DSH gives an `html` fence a real language
+  // name but never wraps its body in the highlighter's `<div class="shiki">`, so
+  // a seam that waits for that wrapper waits forever, spends its whole retry
+  // budget, and abandons a block that has been finished for minutes. The source
+  // stopped changing, which is the fact that matters.
+  const { env, seam } = mount(
+    conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE, streaming: true }) }]),
+  )
+  eq(seam.size(), 0, 'not claimed on arrival: no observation yet')
+  await sleep(PLAIN_SETTLE_MS * 2 + 120)
+  eq(seam.size(), 1, 'claimed once the source has held still for two quiet periods')
+  assert(switcher(env.document) !== null, 'and the switch is on the page')
+})
+
+await test('a claim is released when the source it was made from changes', async () => {
+  // The other side of the same coin: content-stability can claim a fence a
+  // moment before the stream resumes, and a preview of a truncated document is
+  // wrong in the same silent way a missing switch is. Releasing it hands the
+  // block back to the host, which shows the source again, and the next quiet
+  // period re-claims it.
+  const { env, seam } = mount(
+    conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE, streaming: true }) }]),
+  )
+  await sleep(PLAIN_SETTLE_MS * 2 + 120)
+  eq(seam.size(), 1, 'claimed on the quiet source')
+  const first = ourRoot(env.document)
+
+  // The stream resumes: the source grows under the block we already took over.
+  const c = content(env.document)
+  c.querySelector('pre').textContent = `${HTML_SAMPLE}\n<!-- more to come -->`
+  await tick()
+  eq(seam.size(), 0, 'released the moment the source moved again')
+  assert(first.parentNode === null, 'our nodes are gone, so the block is the host\'s again')
+  eq(c.getAttribute('data-dvk-mode'), null, 'and the mode attribute with them')
+
+  await sleep(PLAIN_SETTLE_MS * 2 + 120)
+  eq(seam.size(), 1, 're-claimed once the new source goes quiet')
+})
+
 // ---------------------------------------------------------------------------
 // scroll stability
 //

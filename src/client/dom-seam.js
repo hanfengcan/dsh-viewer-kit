@@ -210,13 +210,67 @@ export function createDomSeam(options) {
     }
   }
 
-  /** @type {WeakMap<Element, { dispose: () => void }>} */
+  /** @type {WeakMap<Element, { dispose: () => void, bytes: number }>} */
   const surfaces = new WeakMap()
   /** @type {Map<Element, number>} */
   const quietTimers = new Map()
   /** @type {Map<Element, number>} */
   const retryCounts = new Map()
+  /**
+   * The last source length seen per block, and when it was first seen at that
+   * length. This is the whole streaming test — see `hasSettled`.
+   *
+   * @type {Map<Element, { bytes: number, since: number }>}
+   */
+  const arrivals = new Map()
   let disposed = false
+
+  /**
+   * How long a block's source must hold still before it counts as finished.
+   *
+   * TWO quiet periods, not one. One observation cannot tell a finished fence
+   * from a model that has paused to think, and guessing "finished" there mounts
+   * a preview of a half-written document. Two consecutive unchanged checks are
+   * what turn the absence of change into a decision rather than a coincidence —
+   * and the number is derived from the existing quiet period rather than
+   * invented, so the delay stays a small multiple of the retry cadence instead
+   * of a new constant that only means something here.
+   */
+  const SETTLE_QUIET_MS = PLAIN_SETTLE_MS * 2
+
+  /**
+   * Has this block stopped changing?
+   *
+   * A `<pre>` body is only a PROXY for "the fence has closed", and a proxy that
+   * is wrong in both directions: a live stream and a finished fence can share
+   * the shape, so waiting for the highlighter's `<div class="shiki">` wrapper
+   * waits forever for a fence the host never re-renders, and the block is
+   * abandoned once the retry budget runs out.
+   *
+   * Content cannot lie in the same way. A fence that is still arriving grows on
+   * every token, so its length changes; a fence that is done stops changing. So
+   * "unchanged for two quiet periods" IS the condition, and it is checked here
+   * rather than inferred from a shape the host may never change.
+   *
+   * @param {Element} element
+   * @param {string} source
+   * @returns {boolean}
+   */
+  function hasSettled(element, source) {
+    const bytes = source.length
+    const seen = arrivals.get(element)
+    const now = Date.now()
+    if (seen === undefined || seen.bytes !== bytes) {
+      // Progress, or the first look: either way the block is still arriving,
+      // and a block that keeps arriving must not exhaust its retry budget.
+      arrivals.set(element, { bytes, since: now })
+      retryCounts.delete(element)
+      return false
+    }
+    if (now - seen.since < SETTLE_QUIET_MS) return false
+    arrivals.delete(element)
+    return true
+  }
 
   /**
    * Are the nodes this plugin injected into a block still on the page?
@@ -251,11 +305,16 @@ export function createDomSeam(options) {
       // rendering with no switch and nothing would ever put it back, which is
       // the same failure as a block that was never claimed.
       //
-      // So a claim is honoured only while the nodes it made are still there.
-      // Anything else is treated as an orphaned claim: released, then re-made.
-      if (ownsInjection(element)) return
+      // So a claim is honoured only while the nodes it made are still there
+      // AND the source is still the one we claimed. The second half matters
+      // because a claim can be made a moment before a stream resumes — see
+      // `hasSettled` — and a preview of a truncated document is wrong in the
+      // same silent way a missing switch is.
+      const content = element.querySelector(CONTENT_SELECTOR)
+      const claimed = surfaces.get(element)
+      if (ownsInjection(element) && content !== null && readSource(content).length === claimed.bytes) return
       try {
-        surfaces.get(element)?.dispose()
+        claimed?.dispose()
       } catch {
         /* ignore */
       }
@@ -264,7 +323,9 @@ export function createDomSeam(options) {
     // Not our surface to touch. Deliberately no `schedule`: a block in another
     // panel will never become a conversation block, so retrying it would only
     // burn the retry budget and log noise.
-    if (!inConversation(element)) return
+    if (!inConversation(element)) {
+      return
+    }
     const content = element.querySelector(CONTENT_SELECTOR)
     if (content === null) {
       // No viewport node: not a block shape we know. Retry briefly in case it
@@ -282,21 +343,25 @@ export function createDomSeam(options) {
     // A generic label means DSH has no highlighter for this fence and the real
     // language name is not in the DOM. A plain body has the same cause.
     //
-    // Neither is a reason to skip the block: `plain` is also what an unknown
-    // language looks like *after* streaming has finished, so waiting for a
-    // highlighted body would wait forever. Instead the request is built with
-    // an EMPTY language and the renderers decide from the source. A block that
-    // is genuinely still streaming cannot satisfy a content rule (its JSON or
-    // its table is incomplete), so it falls through to the bounded retry and
-    // is picked up by the mutation that completes it. That is the point of
-    // deciding on content: the decision is self-correcting, where a timer can
-    // only guess.
+    // Neither is a reason to skip the block: `plain` is also what a finished
+    // fence looks like when the host never wraps it, so the request is built
+    // with an EMPTY language and the renderers decide from the source. Whether
+    // the fence is still arriving is decided by `hasSettled`, below, which
+    // watches the content rather than the markup.
     const generic = isGenericLabel(label)
-    if (!generic && settleState(content).reason !== 'highlighted') {
-      // A plain body under a REAL language name is a live stream: the fence has
-      // not closed yet. Claiming it now would mount a preview over text that is
-      // still changing, and the preview would have to be torn down and rebuilt
-      // on every token. Wait for the mutation that settles it.
+    // Two ways out, and both have to be here.
+    //
+    // A GENERIC label is DSH saying it has no highlighter for this fence, so no
+    // `<div class="shiki">` wrapper is ever coming and waiting for one would
+    // wait forever. There is nothing to distinguish "finished" from "arriving"
+    // in the markup, so those blocks are decided on content alone — which is
+    // what the old shape test could not do, and why they are claimed on sight.
+    //
+    // A REAL label under a plain body is the case that used to hang: the host
+    // names a language it will not highlight, so the shape never changes and a
+    // shape test waits until the retry budget is gone. Those wait for the
+    // CONTENT to hold still, which is the one signal that cannot be wrong.
+    if (!generic && settleState(content).reason !== 'highlighted' && !hasSettled(element, source)) {
       schedule(element)
       return
     }
@@ -317,11 +382,12 @@ export function createDomSeam(options) {
         schedule(element)
         return
       }
-      surfaces.set(element, surface)
+      surfaces.set(element, { dispose: surface.dispose, bytes: source.length })
       const timer = quietTimers.get(element)
       if (timer !== undefined) clearTimeout(/** @type {any} */ (timer))
       quietTimers.delete(element)
       retryCounts.delete(element)
+      arrivals.delete(element)
     } catch (error) {
       onError(error)
     }
@@ -376,6 +442,10 @@ export function createDomSeam(options) {
         if (surface !== undefined) {
           surface.dispose()
           surfaces.delete(element)
+          // The block is gone, so its "still arriving" bookkeeping goes with it.
+          // A recycled row reuses neither the node nor the answer.
+          arrivals.delete(element)
+          retryCounts.delete(element)
         }
       }
       // A React swap replaces the subtree without an add/remove we can key
@@ -469,6 +539,7 @@ export function createDomSeam(options) {
       for (const timer of quietTimers.values()) clearTimeout(/** @type {any} */ (timer))
       quietTimers.clear()
       retryCounts.clear()
+      arrivals.clear()
       for (const element of root.querySelectorAll(CODE_BLOCK_SELECTOR)) {
         surfaces.get(/** @type {Element} */ (element))?.dispose()
       }
