@@ -60,6 +60,27 @@ class ShimElement {
     // `available()` in renderers/table.js.
     this.scrollHeight = ownerDocument?.layout?.scrollHeight ?? 0
     this.clientHeight = ownerDocument?.layout?.clientHeight ?? 0
+    this.scrollTop = 0
+  }
+
+  /**
+   * The vertical band this element occupies, in viewport coordinates.
+   *
+   * There is no layout engine here, so the answer comes from the document's
+   * `layoutOf` hook: a test describes a layout, and describing one that CHANGES
+   * when the plugin mutates the tree is what makes an assertion about reflow
+   * possible at all. With no hook the element reports nothing, which every
+   * caller here reads as "not laid out" rather than as "zero-sized" — the same
+   * reading a browser gives a detached element.
+   *
+   * @returns {{ top: number, height: number, bottom: number, left: number, right: number, width: number }}
+   */
+  getBoundingClientRect() {
+    const layout = this.ownerDocument?.layoutOf
+    const band = typeof layout === 'function' ? layout(this) : null
+    const top = Number(band?.top) || 0
+    const height = Number(band?.height) || 0
+    return { top, height, bottom: top + height, left: 0, right: 0, width: 0 }
   }
 
   // --- attributes ---------------------------------------------------------
@@ -107,6 +128,11 @@ class ShimElement {
 
   get firstElementChild() {
     return this.children[0] ?? null
+  }
+
+  get parentElement() {
+    const parent = this.parentNode
+    return parent !== null && parent.nodeType === 1 ? /** @type {ShimElement} */ (parent) : null
   }
 
   get lastElementChild() {
@@ -465,6 +491,16 @@ class ShimDocument {
     // Set before any element exists, because every element reads it.
     // `mount()` overwrites it to describe a layout the plugin can react to.
     this.layout = { scrollHeight: 0, clientHeight: 0 }
+    /**
+     * Optional `(element) => { top, height }` describing where things are.
+     *
+     * The shim has no layout engine, so this is how a test states one — and
+     * stating one that responds to the plugin's own mutations is the only way to
+     * assert anything about reflow. Left null, every element reports no box.
+     *
+     * @type {((element: ShimElement) => { top: number, height: number } | null) | null}
+     */
+    this.layoutOf = null
     // Initialised before any child is attached: `appendChild` records, and the
     // constructor itself appends.
     /** @type {Array<{ target: ShimElement, observer: ShimMutationObserver }>} */

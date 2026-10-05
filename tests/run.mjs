@@ -303,7 +303,7 @@ process.stdout.write('\nseam (fixture DOM)\n')
  * configured the way the client half configures it.
  *
  * @param {string} html
- * @param {{ config?: Record<string, unknown>, storage?: ShimStorage | null, renderers?: object[] }} [options]
+ * @param {{ config?: Record<string, unknown>, storage?: ShimStorage | null, renderers?: object[], layout?: { scrollHeight: number, clientHeight: number }, layoutOf?: (env: any) => void }} [options]
  */
 function mount(html, options = {}) {
   const env = createEnvironment()
@@ -312,6 +312,10 @@ function mount(html, options = {}) {
   // afterwards is too late — the surface has already asked.
   if (options.layout !== undefined) env.document.layout = options.layout
   parseHtml(html, env.document.body)
+  // A hook for tests that must state a layout BEFORE anything is claimed: the
+  // seam reads geometry while it mounts, so anything set afterwards is too
+  // late, and a guard that quietly found no layout would still pass.
+  options.layoutOf?.(env)
   const kit = createKit({
     config: options.config,
     viewState: createViewState({ storage: options.storage === undefined ? new ShimStorage() : options.storage }),
@@ -645,6 +649,212 @@ await test('a streaming block is taken over when it settles, with no rescan need
   c.appendChild(shiki)
   await tick()
   eq(seam.size(), 1, 'the observer picked it up on its own')
+})
+
+// ---------------------------------------------------------------------------
+// scroll stability
+//
+// Claiming a block swaps a `<pre>` as tall as its source for a view capped at
+// `maxPreviewHeight`. The content node generates no box, so that difference IS
+// the block's height — and the conversation is a virtual list with an overscan
+// window, so a block is routinely claimed several turns above the reader.
+// Neither mechanism puts the reader's content back at that moment: the browser
+// suppresses scroll anchoring during a scroll gesture, and the virtual list
+// declines to correct the offset while the reader scrolls backward.
+//
+// The first tests drive the guard directly, so each of its decisions is checked
+// on its own. The last two go through the seam, because a guard nothing calls
+// would pass every one of the first kind.
+// ---------------------------------------------------------------------------
+
+const { keepingScrollPosition } = await import('../src/client/scroll-guard.js')
+
+process.stdout.write('\nscroll stability\n')
+
+/**
+ * The smallest thing the guard can be pointed at: one scrolling container, its
+ * viewport, and a block whose height the test moves.
+ *
+ * The block's band is STATED rather than derived from `scrollTop`, because what
+ * each case turns on is where the block sits relative to the viewport, and a
+ * test that had to compute that would be re-deriving the arithmetic the guard
+ * is supposed to get right. `resizeTo` is the height change, applied inside the
+ * call the guard wraps — the only moment the correction may observe it.
+ *
+ * `scrollHeight` TRACKS the block, because in a real conversation it does: the
+ * block is a large share of the document, so when it collapses the document
+ * collapses with it. That is the whole reason a correction has to be clamped,
+ * and a fixture with a frozen scroll range cannot express it.
+ *
+ * @param {{ offset?: number, scrollHeight?: number, clientHeight?: number, top: number, height: number, followingTail?: boolean }} shape
+ */
+function scrollFixture(shape) {
+  const env = createEnvironment()
+  parseHtml('<div class="scroller"><div class="turn"><div class="block"></div></div></div>', env.document.body)
+  const doc = env.document
+  const scroller = doc.querySelector('.scroller')
+  const block = doc.querySelector('.block')
+  if (shape.followingTail === true) scroller.setAttribute('data-chat-following-tail', '')
+  scroller.clientHeight = shape.clientHeight ?? 600
+  scroller.scrollTop = shape.offset ?? 0
+  const rest = shape.scrollHeight ?? 20000
+  let height = shape.height
+  // A getter, not a value: the document is re-measured on every read, so a
+  // test that resizes the block also shortens the document, exactly as the
+  // browser will.
+  Object.defineProperty(scroller, 'scrollHeight', { get: () => rest + height, configurable: true })
+  doc.layoutOf = (element) => {
+    if (element === scroller) return { top: 0, height: scroller.clientHeight }
+    if (element === block) return { top: shape.top, height }
+    return null
+  }
+  return { doc, scroller, block, resizeTo: (next) => { height = next } }
+}
+
+/** How tall a block is once it is showing a capped preview. */
+const PREVIEW_HEIGHT = 346
+/** How tall the same block is showing a prototype document's source. */
+const SOURCE_HEIGHT = 4000
+
+await test('a block above the reading line that shrinks is undone, so the reader does not slide', () => {
+  const { scroller, block, resizeTo } = scrollFixture({ offset: 10000, top: -4200, height: SOURCE_HEIGHT })
+  keepingScrollPosition(block, () => resizeTo(PREVIEW_HEIGHT))
+  eq(scroller.scrollTop, 10000 - (SOURCE_HEIGHT - PREVIEW_HEIGHT),
+    'the offset moved by exactly the height the block lost')
+})
+
+await test('a block that only clips the top of the viewport is still corrected', () => {
+  // The shape that actually reaches the reader: a long source arrives with a
+  // sliver of its bottom edge showing and everything else already scrolled
+  // past. Its bottom edge (220) is above the reading line (300), so what the
+  // reader is looking at is content below it — and all of that just moved by
+  // the block's whole height. Treating "some of it is visible" as "they are
+  // watching it" is what let the offset go past the end of the document.
+  const { scroller, block, resizeTo } = scrollFixture({ offset: 10000, top: -3780, height: SOURCE_HEIGHT })
+  keepingScrollPosition(block, () => resizeTo(PREVIEW_HEIGHT))
+  eq(scroller.scrollTop, 10000 - (SOURCE_HEIGHT - PREVIEW_HEIGHT),
+    'clipped at the top is still "above the reading line", so the reader keeps their place')
+})
+
+await test('a block below the viewport never moves the reader', () => {
+  // Growing a block below the viewport pushes down only what is BELOW it, which
+  // the reader cannot see. Correcting here would move the page for nothing.
+  const { scroller, block, resizeTo } = scrollFixture({ offset: 1000, top: 3000, height: 200 })
+  keepingScrollPosition(block, () => resizeTo(800))
+  eq(scroller.scrollTop, 1000, 'untouched: nothing the reader can see moved')
+})
+
+await test('a block the reader is looking at is left alone', () => {
+  // Its bottom edge is far below the reading line, so the reader is inside the
+  // block. The swap is the feature working; moving the page would be the
+  // larger surprise.
+  const { scroller, block, resizeTo } = scrollFixture({ offset: 1000, top: -100, height: SOURCE_HEIGHT })
+  keepingScrollPosition(block, () => resizeTo(PREVIEW_HEIGHT))
+  eq(scroller.scrollTop, 1000, 'the swap is visible to the reader, so the page is not moved under them')
+})
+
+await test('a list the host is pinning to its tail is left alone', () => {
+  // The host re-derives an end-anchored offset from the total size, so it has
+  // already absorbed this resize. Correcting on top of its own would move the
+  // reader twice for one change. This is the host's state to read, not a
+  // distance: the reader in the next test sits just as close to the end and is
+  // not pinned, and only the host knows the difference.
+  const { scroller, block, resizeTo } = scrollFixture({
+    offset: 28405, top: -11581, height: SOURCE_HEIGHT, scrollHeight: 16576, followingTail: true,
+  })
+  keepingScrollPosition(block, () => resizeTo(PREVIEW_HEIGHT))
+  eq(scroller.scrollTop, 28405, 'following the tail: the host owns that offset')
+})
+
+await test('a reader near the end who is NOT following the tail is still corrected', () => {
+  // The captured failure, verbatim: offset 15,938 of a floor of 16,964, and a
+  // block 15,724px tall whose bottom edge clips 121px into the viewport. A
+  // "near the end?" test run after the resize compares this offset against the
+  // NEW scrollHeight, finds it past the end, and concludes the reader is
+  // pinned — skipping the one correction that keeps their position valid, and
+  // leaving the browser to clamp them to the new end.
+  const TALL = 15724
+  const { scroller, block, resizeTo } = scrollFixture({ offset: 15938, scrollHeight: 1840, top: -15603, height: TALL })
+  keepingScrollPosition(block, () => resizeTo(PREVIEW_HEIGHT))
+  eq(scroller.scrollTop, 15938 - (TALL - PREVIEW_HEIGHT),
+    'corrected, not mistaken for pinned: the offset is legal in the shorter document')
+  assert(scroller.scrollTop < scroller.scrollHeight - scroller.clientHeight,
+    'and it is not sitting on the new end, which is where an uncorrected reader lands')
+})
+
+await test('the correction is clamped at the top of the document', () => {
+  // Reachable, and only with a small block near the top: the content below it
+  // moves up by more than the distance from the document's start to the
+  // reader, so the step overshoots 0.
+  const { scroller, block, resizeTo } = scrollFixture({ offset: 100, top: -100, height: 380 })
+  keepingScrollPosition(block, () => resizeTo(100))
+  eq(scroller.scrollTop, 0, 'a step past the start stops at 0 rather than going negative')
+})
+
+await test('the change still runs when there is no scroller and no layout to correct against', () => {
+  const env = createEnvironment()
+  const lone = env.document.createElement('div')
+  env.document.body.appendChild(lone)
+  eq(keepingScrollPosition(lone, () => 'ran'), 'ran', 'nothing to correct, so the change is not skipped')
+  assert(lone.getBoundingClientRect().height === 0, 'an element with no described layout reports no box')
+})
+
+await test('claiming a block above the reader leaves their scroll offset alone', () => {
+  const { env } = mount(
+    `<div class="scroller">${conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) }])}</div>`,
+    {
+      layoutOf: (/** @type {any} */ e) => {
+        const doc = e.document
+        const scroller = doc.querySelector('.scroller')
+        const blk = doc.querySelector('.md-code-block')
+        scroller.clientHeight = 600
+        scroller.scrollHeight = 20000
+        scroller.scrollTop = 10000
+        // Keyed off the block's own mode, because that is the attribute the
+        // stylesheet keys the hide/show off — so the height really does change
+        // when the claim swaps the source out for a preview. NOT off `.dvk-view`
+        // existing: the view root is appended before the switch runs, and an
+        // empty one is `display: none`, so it changes nothing on its own.
+        doc.layoutOf = (node) => {
+          if (node === scroller) return { top: 0, height: 600 }
+          if (node === blk) {
+            const preview = content(doc).getAttribute('data-dvk-mode') === 'preview'
+            return { top: -4200, height: preview ? PREVIEW_HEIGHT : SOURCE_HEIGHT }
+          }
+          return null
+        }
+      },
+    },
+  )
+  const scroller = env.document.querySelector('.scroller')
+  eq(content(env.document).getAttribute('data-dvk-mode'), 'preview', 'the block was claimed and opened in preview')
+  eq(scroller.scrollTop, 10000 - (SOURCE_HEIGHT - PREVIEW_HEIGHT),
+    'the reader is exactly where they were before the block above them collapsed')
+})
+
+await test('claiming a block the reader is looking at does not move them', () => {
+  const { env } = mount(
+    `<div class="scroller">${conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: HTML_SAMPLE }) }])}</div>`,
+    {
+      layoutOf: (/** @type {any} */ e) => {
+        const doc = e.document
+        const scroller = doc.querySelector('.scroller')
+        const blk = doc.querySelector('.md-code-block')
+        scroller.clientHeight = 600
+        scroller.scrollHeight = 20000
+        scroller.scrollTop = 1000
+        doc.layoutOf = (node) => {
+          if (node === scroller) return { top: 0, height: 600 }
+          if (node === blk) {
+            const preview = content(doc).getAttribute('data-dvk-mode') === 'preview'
+            return { top: -200, height: preview ? PREVIEW_HEIGHT : SOURCE_HEIGHT }
+          }
+          return null
+        }
+      },
+    },
+  )
+  eq(env.document.querySelector('.scroller').scrollTop, 1000, 'the page stays put for a visible swap')
 })
 
 // ---------------------------------------------------------------------------

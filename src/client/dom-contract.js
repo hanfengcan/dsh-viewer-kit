@@ -116,6 +116,56 @@ export const SWITCH_ATTRIBUTE = 'data-dvk-switch'
 export const PLAIN_SETTLE_MS = 300
 
 /**
+ * Marks the conversation root while the host is pinning the reader to the tail.
+ *
+ * The distinction this buys is not cosmetic. A reader can sit near the end of a
+ * conversation without the host pinning them there — a long code block can
+ * occupy most of the document, so "close to the end" is just where the content
+ * happens to be, and an arithmetic test for it is both unknowable here and
+ * wrong: whether the reader looks pinned depends on the viewport height, which
+ * changes with the window. Only this attribute says the offset is the HOST's
+ * decision and will be re-derived by the host on every resize.
+ *
+ * Read it as a presence test on an ancestor of the code block, and treat a miss
+ * as "the reader is not pinned": correcting a tail-following reader would leave
+ * them adrift above the bottom mid-stream, and correcting an unpinned one is
+ * what the reader wants. So a rename on a DSH upgrade costs a small regression
+ * during streaming and nothing else — the safe direction to fail in.
+ *
+ * From `dsh-client-ui-chat/lib/client.js`: the `followingTail` state, the same
+ * one that puts `overflow-anchor: none` on the scroller.
+ */
+export const FOLLOWING_TAIL_SELECTOR = '[data-chat-following-tail]'
+
+/*
+ * The conversation's scroll model, which decides whether a claim may move a reader.
+ *
+ * Three facts, all from the shipped
+ * `@deepseek-ai/dsh-client-ui-chat/lib/client.js`, and all of them reasons the
+ * plugin has to correct its own height change rather than assume something else
+ * will:
+ *
+ * 1. **The flow is a virtual list.** `useVirtualizer({ overscan: 3 })` mounts
+ *    turns above and below the visible range, so a code block is routinely
+ *    claimed while it is still off screen. Claiming it changes its height by
+ *    however much taller its source was than the view that replaces it.
+ * 2. **The virtual list declines to correct a backward scroll.** On re-measure
+ *    it applies the size delta to the scroll offset only when
+ *    `scrollDirection !== "backward"` — during a backward scroll a correction
+ *    would fight the reader's own motion. Reading a message upwards is exactly
+ *    when a claim lands.
+ * 3. **The browser stands down too.** Scroll anchoring is suppressed while a
+ *    scroll gesture is in flight, and the seam claims blocks from a
+ *    `MutationObserver` callback, which is mid-gesture by construction.
+ *
+ * (2) and (3) together are why a resize away from the viewport displaces the
+ * content the reader is looking at by the full height delta, with nothing to
+ * put it back. `scroll-guard.js` is what puts it back; it is deliberately a
+ * no-op for a block inside the viewport, and for a list pinned to its end,
+ * which the host re-derives from the total size itself.
+ */
+
+/**
  * How many quiet re-checks a single block gets before the seam stops waiting
  * for it and leaves it alone.
  *

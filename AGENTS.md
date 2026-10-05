@@ -36,7 +36,7 @@
 pnpm install
 pnpm run build       # tsdown 打客户端 + 拷贝宿主半体到 lib/
 pnpm run typecheck   # tsc --noEmit（含 checkJs）
-pnpm test            # 147 项测试
+pnpm test            # 157 项测试
 pnpm run repro       # 单独跑一次激活复现，带栈
 pnpm run check       # typecheck → build → test → repro → probe:test → probe
 pnpm run preflight   # 打包 → 解包 → 校验 → 清理
@@ -209,13 +209,14 @@ src/client/
   dom-contract.js            ★ DSH DOM 契约，升级时只核对这里
   dom-seam.js                L1 发现 / 回收 / 作用域边界 / 流式守卫
   code-block-surface.js      L3 一个 surface = 一个代码块
+  scroll-guard.js            认领块会改变它的高度；把由此产生的滚动位移抵消掉
   host-config.js             拉取宿主配置（带超时与回落）
   chunk-loader.js            按需加载引擎 chunk（走 DSH 原生 chunk 机制）
   chunks/echarts.js          引擎本体，独立成文件，不进入口 bundle
   renderers/                 L5 渲染器：echarts / html / table
 src/tools/
   apply-prototype-style.js    apply_prototype_style 工具 + 一次性 prompt 段落
-tests/                       147 项测试 + 探针负向测试 + DOM 垫片 + 从 DSH 产物抄来的夹具
+tests/                       157 项测试 + 探针负向测试 + DOM 垫片 + 从 DSH 产物抄来的夹具
 tools/probe-host.mjs         ★ 宿主契约探针（读 app.asar）
 tools/preflight.mjs          打包后自检
 docs/01-architecture.md      架构与取舍的完整记录（§ 引用它，别在注释里重述）

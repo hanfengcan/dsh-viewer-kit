@@ -89,6 +89,27 @@ const ROOT_ATTRIBUTE = "data-dvk-root";
 const MODE_ATTRIBUTE = "data-dvk-mode";
 /** Our own marker on the view switch, so cleanup finds it again. */
 const SWITCH_ATTRIBUTE = "data-dvk-switch";
+/**
+* Marks the conversation root while the host is pinning the reader to the tail.
+*
+* The distinction this buys is not cosmetic. A reader can sit near the end of a
+* conversation without the host pinning them there — a long code block can
+* occupy most of the document, so "close to the end" is just where the content
+* happens to be, and an arithmetic test for it is both unknowable here and
+* wrong: whether the reader looks pinned depends on the viewport height, which
+* changes with the window. Only this attribute says the offset is the HOST's
+* decision and will be re-derived by the host on every resize.
+*
+* Read it as a presence test on an ancestor of the code block, and treat a miss
+* as "the reader is not pinned": correcting a tail-following reader would leave
+* them adrift above the bottom mid-stream, and correcting an unpinned one is
+* what the reader wants. So a rename on a DSH upgrade costs a small regression
+* during streaming and nothing else — the safe direction to fail in.
+*
+* From `dsh-client-ui-chat/lib/client.js`: the `followingTail` state, the same
+* one that puts `overflow-anchor: none` on the scroller.
+*/
+const FOLLOWING_TAIL_SELECTOR = "[data-chat-following-tail]";
 
 //#endregion
 //#region src/client/contract.js
@@ -335,6 +356,151 @@ function createRequest(input) {
 }
 
 //#endregion
+//#region src/client/scroll-guard.js
+/**
+* Keep the reader where they were when a code block changes height.
+*
+* ## Why a block's height is a layout event
+*
+* The content node generates no box (`dom-contract.js`, "The content node
+* generates no box"), so a block's height IS the height of whichever of its two
+* children is visible. Claiming a block swaps the native `<pre>` — as tall as
+* the source, which for a prototype document is thousands of pixels — for a
+* view capped at `maxPreviewHeight`. Nothing absorbs that difference: it lands on
+* every sibling below it, in the block's own scroll container, in one frame.
+*
+* ## Why the container does not put it back
+*
+* It would not, for the three reasons recorded in `dom-contract.js` under "The
+* conversation's scroll model": the flow is a virtual list, that list declines
+* to correct the offset while the reader scrolls backward, and the browser
+* suppresses scroll anchoring during a scroll gesture — which is when the seam
+* claims, because it reacts to a `MutationObserver` callback.
+*
+* So the content under the reader's eyes slides away by an amount proportional
+* to the height of a block they never saw change. This module is the half of
+* that contract none of the three provides.
+*
+* ## The failure that matters is a position that stops existing
+*
+* Moving the offset back is the easy half. The severe half is what a long source
+* does to the reader's COORDINATE: a block whose source is 15,000px tall
+* collapses to a 320px preview, so the document is 15,000px shorter a frame
+* later. A reader standing 15,937px down is then past the new end of the
+* document, and the browser answers by clamping them to the bottom — which is
+* not a nudge, it is the end of the conversation. No amount of scroll anchoring
+* helps, because there is nothing at that offset left to anchor to.
+*
+* ## What it deliberately does NOT do
+*
+* Changing a block's height only ever moves the content BELOW it. So the only
+* question worth asking is whether the reader is looking at that content, and
+* the reading line — the middle of the visible area — answers it without a
+* tolerance to tune:
+*
+*   - **Block's bottom edge above the line → correct.** The reader's view is
+*     dominated by content below the block, and that content just moved.
+*   - **Block's bottom edge below the line → leave it.** The reader is looking
+*     at the block, or at content above it, and neither of those moves. This
+*     also covers a block entirely below the viewport: growing it pushes down
+*     only what is below IT, which the reader cannot see.
+*
+* A block that merely CLIPS the top of the viewport is in the first case, and
+* that is the common one: a long source usually arrives with a sliver of its
+* bottom edge showing and 99% of it already scrolled past. Treating "some part
+* of it is visible" as "the reader is watching it" is what let the clamp
+* through.
+*
+* **Nothing while the host is following the tail.** The host re-derives that
+* offset from the total size, so it has already absorbed a resize above the
+* viewport. Correcting it here would move the reader twice for one resize, and
+* the second correction is the one they feel. That state is the host's to
+* report — see `FOLLOWING_TAIL_SELECTOR` — and it is read BEFORE the change,
+* because a resize shortens the document and any "is the reader near the end"
+* arithmetic run afterwards calls everybody past the end.
+*
+* @module scroll-guard
+*/
+/**
+* The vertical band an element occupies, in viewport coordinates.
+*
+* `bottom` is derived rather than read so the overlap test cannot compare two
+* numbers that came from different places — a host that omits `DOMRect.bottom`
+* would otherwise make "is it on screen" disagree with "is it tall".
+*
+* @typedef {{ top: number, height: number, bottom: number }} Band
+*/
+/**
+* @param {Element} element
+* @returns {Band | null} null when the element has no layout to report
+*/
+function bandOf(element) {
+	const measure = element.getBoundingClientRect;
+	if (typeof measure !== "function") return null;
+	const rect = measure.call(element);
+	const top = Number(rect?.top);
+	const height = Number(rect?.height);
+	if (!Number.isFinite(top) || !Number.isFinite(height) || height <= 0) return null;
+	return {
+		top,
+		height,
+		bottom: top + height
+	};
+}
+/**
+* The nearest ancestor whose scroll offset moves the page.
+*
+* Decided geometrically rather than from computed style, because that is the
+* property the correction actually depends on: an ancestor that cannot scroll
+* ignores `scrollTop` whatever its `overflow` says. `clientHeight > 0` is what
+* rejects an unlaid-out or detached ancestor, where both numbers are 0 and the
+* overflow comparison would otherwise pass on every element in a document that
+* has not been painted yet.
+*
+* @param {Element} node
+* @returns {Element | null}
+*/
+function scrollerOf(node) {
+	let current = node.parentElement;
+	while (current !== null) {
+		if (current.clientHeight > 0 && current.scrollHeight > current.clientHeight) return current;
+		current = current.parentElement;
+	}
+	return null;
+}
+/**
+* Run `change`, then undo the scroll damage it did — if it did any.
+*
+* The correction is applied synchronously, before the browser gets a frame to
+* paint the new layout, because a correction that lands a frame later is a jump
+* the reader sees. Reading layout twice costs a forced reflow, which is why this
+* wraps a whole view switch rather than every individual DOM write inside one.
+*
+* @template T
+* @param {Element} node the element whose height `change` may alter
+* @param {() => T} change
+* @returns {T} whatever `change` returned
+*/
+function keepingScrollPosition(node, change) {
+	const scroller = scrollerOf(node);
+	if (scroller === null) return change();
+	const before = bandOf(node);
+	const viewport = bandOf(scroller);
+	if (before === null || viewport === null) return change();
+	if (before.bottom >= viewport.top + viewport.height / 2) return change();
+	if (scroller.closest("[data-chat-following-tail]") !== null) return change();
+	const offset = scroller.scrollTop;
+	const result = change();
+	const after = bandOf(node);
+	if (after === null) return result;
+	const delta = after.height - before.height;
+	if (delta === 0) return result;
+	const limit = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+	scroller.scrollTop = Math.min(limit, Math.max(0, offset + delta));
+	return result;
+}
+
+//#endregion
 //#region src/client/code-block-surface.js
 /**
 * Host surface for one code block.
@@ -343,7 +509,7 @@ function createRequest(input) {
 * switch appended to the banner, and a root element appended to the content
 * viewport. It never mutates anything DSH created.
 *
-* The five invariants it promises (docs/01-architecture.md §6.4):
+* The six invariants it promises (docs/01-architecture.md §6.4):
 *   1. only ever append nodes marked with `data-dvk-*`; never remove or
 *      reorder a node DSH created;
 *   2. show/hide by toggling *our* attribute on the content node, never by
@@ -352,7 +518,9 @@ function createRequest(input) {
 *      list React reconciles positionally and never extends past its own;
 *   4. the native source subtree is never touched, so switching back to code
 *      is byte-for-byte lossless;
-*   5. `dispose()` leaves the block exactly as it was found.
+*   5. `dispose()` leaves the block exactly as it was found;
+*   6. the only write outside the block is the scroll offset correction for a
+*      height change this surface caused — see scroll-guard.js.
 *
 * @module code-block-surface
 */
@@ -571,23 +739,25 @@ function createCodeBlockSurface(options) {
 		current = viewId;
 		if (byUser) kit.setView(request.id, viewId);
 		for (const button of buttons) button.setAttribute("aria-pressed", String(button.getAttribute("data-dvk-view") === viewId));
-		content.setAttribute(MODE_ATTRIBUTE, viewId === "code" ? "code" : "preview");
-		viewRoot.replaceChildren();
-		try {
-			const result = instance?.enter(viewId);
-			if (result != null && typeof result.then === "function")
+		keepingScrollPosition(root, () => {
+			content.setAttribute(MODE_ATTRIBUTE, viewId === "code" ? "code" : "preview");
+			viewRoot.replaceChildren();
+			try {
+				const result = instance?.enter(viewId);
+				if (result != null && typeof result.then === "function")
  /** @type {Promise<void>} */ result.catch((error) => host.fail(error));
-		} catch (error) {
-			host.fail(error);
-		}
-		if (viewId === "code") expandOffered = false;
-		else try {
-			expandOffered = instance?.expand?.available?.() !== false;
-		} catch (error) {
-			host.fail(error);
-			expandOffered = true;
-		}
-		syncExpandControl(viewId);
+			} catch (error) {
+				host.fail(error);
+			}
+			if (viewId === "code") expandOffered = false;
+			else try {
+				expandOffered = instance?.expand?.available?.() !== false;
+			} catch (error) {
+				host.fail(error);
+				expandOffered = true;
+			}
+			syncExpandControl(viewId);
+		});
 	}
 	current = pickInitialView();
 	enter(current);

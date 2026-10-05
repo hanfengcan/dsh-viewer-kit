@@ -5,7 +5,7 @@
  * switch appended to the banner, and a root element appended to the content
  * viewport. It never mutates anything DSH created.
  *
- * The five invariants it promises (docs/01-architecture.md §6.4):
+ * The six invariants it promises (docs/01-architecture.md §6.4):
  *   1. only ever append nodes marked with `data-dvk-*`; never remove or
  *      reorder a node DSH created;
  *   2. show/hide by toggling *our* attribute on the content node, never by
@@ -14,13 +14,16 @@
  *      list React reconciles positionally and never extends past its own;
  *   4. the native source subtree is never touched, so switching back to code
  *      is byte-for-byte lossless;
- *   5. `dispose()` leaves the block exactly as it was found.
+ *   5. `dispose()` leaves the block exactly as it was found;
+ *   6. the only write outside the block is the scroll offset correction for a
+ *      height change this surface caused — see scroll-guard.js.
  *
  * @module code-block-surface
  */
 
 import { BANNER_SELECTOR, CONTENT_SELECTOR, MODE_ATTRIBUTE, ROOT_ATTRIBUTE, SWITCH_ATTRIBUTE } from './dom-contract.js'
 import { normalizeLang } from './contract.js'
+import { keepingScrollPosition } from './scroll-guard.js'
 
 const SVG_NAMESPACE = 'http://www.w3.org/2000/svg'
 
@@ -309,34 +312,43 @@ export function createCodeBlockSurface(options) {
     for (const button of buttons) {
       button.setAttribute('aria-pressed', String(button.getAttribute('data-dvk-view') === viewId))
     }
-    content.setAttribute(MODE_ATTRIBUTE, viewId === 'code' ? 'code' : 'preview')
-    // Every view switch starts from an empty root; the renderer re-mounts what
-    // it needs. This is what keeps `code` free: it mounts nothing at all.
-    viewRoot.replaceChildren()
-    try {
-      const result = instance?.enter(viewId)
-      if (result != null && typeof (/** @type {any} */ (result).then) === 'function') {
-        /** @type {Promise<void>} */ (result).catch((error) => host.fail(error))
-      }
-    } catch (error) {
-      host.fail(error)
-    }
-    // After `enter`, so `instance.expand` reflects the view that just mounted and
-    // so a renderer can inspect what it actually laid out. `available` is
-    // optional and an absent one means "always offer it".
-    if (viewId === 'code') expandOffered = false
-    else {
+    // Everything below can change how tall the block is: the swap hides one view
+    // and shows the other, the expand control appears in the banner, and the
+    // renderer mounts what the new view needs. A block is claimed wherever the
+    // seam happens to find it, and the conversation is a virtual list — so this
+    // routinely runs on a block several turns above the reader, whose content
+    // then slides out from under them. The guard puts it back, and is a no-op
+    // for a block they are actually looking at.
+    keepingScrollPosition(root, () => {
+      content.setAttribute(MODE_ATTRIBUTE, viewId === 'code' ? 'code' : 'preview')
+      // Every view switch starts from an empty root; the renderer re-mounts what
+      // it needs. This is what keeps `code` free: it mounts nothing at all.
+      viewRoot.replaceChildren()
       try {
-        expandOffered = instance?.expand?.available?.() !== false
+        const result = instance?.enter(viewId)
+        if (result != null && typeof (/** @type {any} */ (result).then) === 'function') {
+          /** @type {Promise<void>} */ (result).catch((error) => host.fail(error))
+        }
       } catch (error) {
-        // A renderer that cannot answer must not lose the control: offering a
-        // button that turns out to be unhelpful is a smaller failure than
-        // hiding the only way to enlarge.
         host.fail(error)
-        expandOffered = true
       }
-    }
-    syncExpandControl(viewId)
+      // After `enter`, so `instance.expand` reflects the view that just mounted and
+      // so a renderer can inspect what it actually laid out. `available` is
+      // optional and an absent one means "always offer it".
+      if (viewId === 'code') expandOffered = false
+      else {
+        try {
+          expandOffered = instance?.expand?.available?.() !== false
+        } catch (error) {
+          // A renderer that cannot answer must not lose the control: offering a
+          // button that turns out to be unhelpful is a smaller failure than
+          // hiding the only way to enlarge.
+          host.fail(error)
+          expandOffered = true
+        }
+      }
+      syncExpandControl(viewId)
+    })
   }
 
   // Enter once so a block that opens in preview is already live. No `byUser`:
