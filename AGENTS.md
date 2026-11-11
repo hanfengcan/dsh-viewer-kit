@@ -36,7 +36,7 @@
 pnpm install
 pnpm run build       # tsdown 打客户端 + 拷贝宿主半体到 lib/
 pnpm run typecheck   # tsc --noEmit（含 checkJs）
-pnpm test            # 161 项测试
+pnpm test            # 全量测试
 pnpm run repro       # 单独跑一次激活复现，带栈
 pnpm run check       # typecheck → build → test → repro → probe:test → probe
 pnpm run preflight   # 打包 → 解包 → 校验 → 清理
@@ -83,7 +83,7 @@ SSE 推给浏览器。
 
 ### 宿主半体要重启，这是设计不是疏漏
 
-`dsh-hmr` 的默认忽略清单里有 **`**/node_modules`**（`dsh-hmr/lib/index.js:241`，
+`dsh-hmr` 的默认忽略清单里有 **`**/node_modules`**（`dsh-hmr/lib/index.js`，
 经 `picomatch` 应用在 watcher 的 `ignored` 上）。`file:` 安装的插件正好住在 profile 的
 `node_modules` 里，所以它的**宿主模块永远不会被监听**。
 
@@ -162,7 +162,7 @@ fiber 重启也救不了：模块已被 ESM loader 缓存进正在跑的进程�
 - `tests/probe-host.mjs` —— 每条宿主检查都有一个"改坏"的宿主编档能让它变红，
   外加一条"忠实宿主必须全绿"（否则一个永远失败的探针也能满足全部负向测试）。
 - `tools/preflight.mjs` —— 改坏产物名、写错包名、删声明、去掉 chunk，四种破坏都能报出。
-- 文档守卫 —— README 引用的日志行、版本号、tarball 名、测试数、截图有无孤儿，全部对照真实产物。
+- 文档守卫 —— README 引用的日志行、截图有无孤儿、跨文档链接与章节引用，以及「文档里不许硬编码版本号、包名、测试数、源码行号」这一条，全部对照真实产物。
 
 ### 4.3 单一真相来源
 
@@ -217,7 +217,7 @@ src/client/
   renderers/                 L5 渲染器：echarts / html / table
 src/tools/
   apply-prototype-style.js    apply_prototype_style 工具 + 一次性 prompt 段落
-tests/                       161 项测试 + 探针负向测试 + DOM 垫片 + 从 DSH 产物抄来的夹具
+tests/                       测试 + 探针负向测试 + DOM 垫片 + 从 DSH 产物抄来的夹具
 tools/probe-host.mjs         ★ 宿主契约探针（读 app.asar）
 tools/preflight.mjs          打包后自检
 docs/01-architecture.md      架构：分层、契约、算法判据（§ 引用它，别在注释里重述）
@@ -233,7 +233,7 @@ docs/03-pitfalls.md          平台里"看起来是某样东西、实际不是"�
 
 目标：**一个新文件 + 一行注册**（`src/client/index.js` 的 `RENDERER_FACTORIES`）。
 
-渲染器要满足 `contract.js` 的 `Renderer`：`id`、`match(request)`、`create(host)`。
+渲染器要满足 `contract.js` 的 `Renderer`：`id`、`match(request, config)`、`create(host)`。
 可选：`label`、`priority`，以及实例上的 `expand {toggle, isOn, available?, subscribe?}`。
 
 **需要额外一步的情况**：引擎很大时要拆成 on-demand chunk，那会多出一个构建条目

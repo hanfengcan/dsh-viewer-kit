@@ -17,7 +17,7 @@
 
 它的名字与位置都指向"这一回合还在跑"，但它挂在 `RunningStatus` ——
 回合**内容之后**的一个"深度思考中"指示器，是 flow item 的**兄弟节点而非祖先**
-（`dsh-client-ui-chat/lib/client.js:3918-3920`）。
+（`dsh-client-ui-chat/lib/client.js`）。
 
 ```js
 element.closest('[data-chat-running]')   // 对任何代码块恒为 null
@@ -65,7 +65,7 @@ cordis 的 `Context` 是 proxy，**读未注册成员直接抛**。抛在 `apply
 **不在 `ctx` 上**。样式表自己插 `<style data-plugin="dsh-viewer-kit">` 并在
 disposer 里移除。
 
-真实客户端 context 混入了 16 个成员（cordis `reflect.ts:219-222`），
+真实客户端 context 混入了 16 个成员（cordis `reflect.ts`），
 加宽 harness 等于删掉那道守卫。
 
 ## 5. `locale.bind(ns)` 返回的就是翻译函数
@@ -108,7 +108,7 @@ t('key')
 | 视口上下**同号**补偿 | 块的高度变化只移动它**下方**的内容。块在中线之下时，块本身与其上方的内容都不动 |
 | 变更后判断"是否贴底" | 高度一收缩，文档就短了。拿变更前的 offset 去比变更后的 `scrollHeight`，每个人都会被判成越界，而越界恰恰是唯一必须补偿的情况 |
 
-正确判据（`scroll-guard.js:139`）：**`before.bottom < viewport.top + viewport.height / 2`**
+正确判据（`scroll-guard.js`）：**`before.bottom < viewport.top + viewport.height / 2`**
 才补偿。宿主是否在跟随尾部由 `scroller.closest(FOLLOWING_TAIL_SELECTOR)` 回答，
 且**必须在 `change()` 之前读**。
 
@@ -162,7 +162,7 @@ import）里登记，否则它不参与运行。目录表达的是"同类聚合"
 
 ## 13. 遮蔽 `conversation.chat.node[assistant-step]` 的成本
 
-技术上可行：`priority: -1` 即可遮蔽（`dsh-client-ui-slots/lib/index.js:168-186`，
+技术上可行：`priority: -1` 即可遮蔽（`dsh-client-ui-slots/lib/index.js`，
 提示语原文 "register at a different priority to shadow it"）。但那要求重写
 `AssistantMarkdown` 的全部行为——正文、思维链折叠、图片分组、停止徽标、
 两个子 slot 的透传、流式 shimmer 与 presentation 策略——而 `ctx.slots` 只有
@@ -170,3 +170,28 @@ import）里登记，否则它不参与运行。目录表达的是"同类聚合"
 **没有回退到官方实现的手段**。
 
 收益是一个围栏的切换按钮。这个交换不成立。
+
+## 14. 围栏名只在宿主有高亮器时才在 DOM 里
+
+`CodeToolbar` 写语言名的那一行是条件表达式：
+
+```tsx
+<span className={css.language}>{supportsHighlighting(lang) ? lang : labels.codeLabel}</span>
+```
+
+`supportsHighlighting` 查的是一张**别名表**（`packages/client/ui-primitives/src/markdown/highlight.ts`
+的 `LANG_ALIASES`），表里只有 Shiki 内置的那些语言。表里没有的名字 —— `svg`、`htm`、
+`xhtml`、`echarts`、任何自定义围栏 —— 一律显示通用文案「代码块」，**原始围栏名在 DOM 里
+根本不存在**。
+
+所以 `readLang` 读到的是通用文案，接缝据此把 `lang` 置空（`dom-seam.js`），
+渲染器只能**按内容判定**。这条已经在两个渲染器上各生效一次：echarts 靠 option
+能不能解析出来认领，html 靠第一个元素是不是 `<svg>` 或文档元素。
+
+判定因此分两档：**有名字时名字说了算**（`lang === 'html'` 只看文档标志），
+**没名字时门槛更高** —— 必须**以**文档元素开头。标志出现在文本任何位置都不算，
+否则 JSON 字符串里的一个 `<body>`、shell 命令里的一句 `<svg>` 都会误伤。
+
+> 另一个容易混淆的地方：`dsh-util-code-language` 里也有一张扩展名表，
+> 那张表把 `svg` 映射到 `xml`。它管的是**文件名后缀**（读一个 `.svg` 文件时选什么
+> 语法），跟**围栏名**是两回事，不能拿它推断围栏的 banner 会显示什么。

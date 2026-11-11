@@ -127,7 +127,11 @@ export function createKit(options = {}) {
         if (config.disabledRendererIds.includes(renderer.id)) continue
         let claimed = false
         try {
-          claimed = renderer.match(request) === true
+          // The config goes along because a claim may depend on an option, and
+          // the renderer has no other way to read it: `hostFor` is built only
+          // for a renderer that already won. A settings change reaches this
+          // path through `invalidate()`, which is what keeps the cache honest.
+          claimed = renderer.match(request, config) === true
         } catch (error) {
           // A broken predicate must not take the whole seam down with it.
           onError(error, { rendererId: renderer.id, requestId: request.id })

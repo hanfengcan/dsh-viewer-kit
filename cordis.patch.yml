@@ -37,7 +37,7 @@
     - id: dsh-viewer-kit
       name: 'dsh-viewer-kit'
       config:
-        # Master switch. false leaves every code block to the host.
+         # Master switch. false leaves every code block to the host.
         #
         # default: true
         enabled: true
@@ -107,6 +107,18 @@
         #
         # default: false
         htmlAllowScripts: false
+
+        # Preview an `html` fence only when its source declares a document:
+        # `<!doctype html>`, `<html>`, `<head>` or `<body>`. An `svg` fence is
+        # never affected, because the `<svg>` element IS the document.
+        # An `html` fence with none of those markers is a fragment quoted inside
+        # an explanation. Previewed, it is a nearly empty frame with a view switch
+        # that invites the reader to look at nothing, so such a block keeps the
+        # native code block instead.
+        # Set false to preview every `html` fence regardless of shape.
+        #
+        # default: true
+        htmlPreviewRequiresDocument: true
 
         # Open a claimed block in its rendered view instead of its source.
         # Preview is the default because the whole point of the kit is to show

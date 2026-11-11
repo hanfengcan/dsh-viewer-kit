@@ -107,8 +107,11 @@
  * @property {string} id Unique; also the deterministic tie-break key.
  * @property {string} [label] Human name for diagnostics.
  * @property {number} [priority] Higher wins. Default 0.
- * @property {(request: RenderRequest) => boolean} match Claim test. Must be
- *   cheap and side-effect free — the host may call it repeatedly.
+ * @property {(request: RenderRequest, config: Readonly<ViewerKitConfig>) => boolean} match
+ *   Claim test. Must be cheap and side-effect free — the host may call it
+ *   repeatedly. `config` is the resolved kit config, handed in because a
+ *   renderer's claim can legitimately depend on an option; treat it as
+ *   read-only.
  * @property {(host: RenderHost) => RendererInstance | null} create Build an
  *   instance, or return null to decline (too large, unsupported shape, …).
  */
@@ -154,6 +157,10 @@
  *   zero.
  * @property {boolean} [htmlAllowScripts] Let previewed HTML run scripts inside
  *   an opaque-origin sandbox. **Off by default**; see docs/01-architecture.md §8.
+ * @property {boolean} [htmlPreviewRequiresDocument] Claim an `html` fence only
+ *   when its source carries a document marker (`<!doctype html>`, `<html>`,
+ *   `<head>`, `<body>`). **On by default**; `svg` is never affected. A fragment
+ *   quoted inside an explanation keeps its native code block.
  * @property {boolean} [defaultToPreview] Open a freshly seen item in its
  *   enhanced view instead of the code view. **On by default.**
  * @property {string} [prototypeStyle] Style specification injected for the one

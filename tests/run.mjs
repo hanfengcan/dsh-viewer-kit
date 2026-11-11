@@ -440,6 +440,95 @@ await test('svg is claimed by the same renderer as html', () => {
   assert(switcher(env.document) !== null, 'claimed')
 })
 
+await test('an svg fence is claimed even though the host has no grammar for it', () => {
+  // The host writes a fence name into the banner only for the languages it has
+  // a grammar for, and `svg` is not one of them — so the banner carries generic
+  // copy and the name never reaches the DOM. The source is then the only
+  // evidence there is, exactly as it is for a chart option.
+  const { env } = mount(
+    conversationFixture([
+      { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'svg', code: '<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10"/></svg>', highlighted: false }) },
+    ]),
+  )
+  assert(switcher(env.document) !== null, 'claimed from the source')
+  eq(switcher(env.document).children[0].getAttribute('data-dvk-view'), 'preview', 'and it is a preview')
+  assert(frame(env.document) !== null, 'with the frame mounted')
+})
+
+await test('an svg fence is rendered as the drawing it is', () => {
+  const { env } = mount(
+    conversationFixture([
+      { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'svg', code: '<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10"/></svg>', highlighted: false }) },
+    ]),
+  )
+  const srcdoc = frame(env.document).srcdoc
+  assert(srcdoc.includes('<svg'), 'the drawing is in the frame')
+  // The XML prologue is meaningless in an HTML frame and actively harmful: the
+  // declaration is a bogus comment and the doctype would mean quirks mode.
+  assert(!srcdoc.includes('<?xml'), 'no XML declaration')
+  assert(!/<!doctype\s+svg/i.test(srcdoc), 'no SVG doctype')
+})
+
+await test('an html fence with no document marker is left as source', () => {
+  const { env } = mount(
+    conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<div class="card">示例</div>' }) }]),
+  )
+  eq(switcher(env.document), null, 'a quoted fragment gains no view switch')
+  eq(ourRoot(env.document), null, 'and nothing was injected')
+})
+
+await test('any one document marker is enough to claim an html fence', () => {
+  const sources = [
+    '<!doctype html><p>hi</p>',
+    '<html lang="zh"><p>hi</p></html>',
+    '<head><title>t</title></head><p>hi</p>',
+    '<body><p>hi</p></body>',
+    '<!DOCTYPE HTML><p>hi</p>',
+  ]
+  for (const source of sources) {
+    const { env } = mount(conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: source }) }]))
+    assert(switcher(env.document) !== null, `claimed: ${source}`)
+  }
+})
+
+await test('htmlPreviewRequiresDocument: false restores previewing every html fence', () => {
+  const { env } = mount(
+    conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<div class="card">示例</div>' }) }]),
+    { config: { htmlPreviewRequiresDocument: false } },
+  )
+  assert(switcher(env.document) !== null, 'claimed with the gate off')
+  assert(frame(env.document) !== null, 'and the frame is mounted')
+})
+
+await test('a fence the host could not name is claimed when it opens a document', () => {
+  // The banner carries a generic label for a language the host has no grammar
+  // for, so the fence name never reaches the DOM. A source that OPENS like a
+  // document is then the only evidence there is.
+  const documents = [
+    '<!doctype html><p>hi</p>',
+    '<html lang="zh"><p>hi</p></html>',
+    '<svg xmlns="http://www.w3.org/2000/svg"><rect width="4" height="4"/></svg>',
+  ]
+  for (const source of documents) {
+    const { env } = mount(
+      conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'whatever', code: source, highlighted: false }) }]),
+    )
+    assert(switcher(env.document) !== null, `claimed: ${source}`)
+  }
+})
+
+await test('a fence the host could not name is left alone when it is not a document', () => {
+  // The bar is higher without a name: a marker anywhere in the text would fire
+  // on a JSON string or a shell command that merely mentions `<body>`.
+  const sources = ['<div class="card">示例</div>', 'const x = "<body>"', 'print("<svg>")']
+  for (const source of sources) {
+    const { env } = mount(
+      conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'whatever', code: source, highlighted: false }) }]),
+    )
+    eq(switcher(env.document), null, `not claimed: ${source}`)
+  }
+})
+
 await test('a streaming block is not taken over; it is once settled', async () => {
   const { env, seam } = mount(
     conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p>part', streaming: true }) }]),
@@ -454,7 +543,7 @@ await test('a streaming block is not taken over; it is once settled', async () =
   shiki.className = 'shiki'
   const pre = env.document.createElement('pre')
   pre.className = 'shiki css-variables'
-  pre.textContent = '<p>part</p>\n'
+  pre.textContent = '<!doctype html><p>part</p>\n'
   shiki.appendChild(pre)
   c.appendChild(shiki)
   seam.scan()
@@ -513,7 +602,7 @@ await test('different content does not inherit a remembered view', () => {
   click(switcher(first.env.document).children[1])
   first.seam.dispose()
 
-  const second = mount(conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p>other</p>' }) }]), { storage })
+  const second = mount(conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<!doctype html><p>other</p>' }) }]), { storage })
   eq(switcher(second.env.document).children[0].getAttribute('aria-pressed'), 'true', 'unrelated content falls back to the default')
 })
 
@@ -532,7 +621,7 @@ await test('the same content in a different message gets its own view state', ()
 
 await test('an oversized html block is not enhanced', () => {
   const html = conversationFixture([
-    { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: 'x'.repeat(5000) }) },
+    { nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: `<!doctype html>${'x'.repeat(5000)}` }) },
   ])
   const { env } = mount(html, { config: { maxSourceBytes: 100 } })
   eq(switcher(env.document), null, 'no switch offered for something we will not render')
@@ -2015,6 +2104,23 @@ await test('the built ids match the package name on both sides', () => {
   )
 })
 
+await test('the bundle reports the manifest version', () => {
+  // The client half carries the version as a literal for the same reason the
+  // package name does: the build config cannot read the manifest. A release
+  // that bumped one and not the other would ship a bundle that reports the
+  // wrong version to the reader — and to the diagnostic hook they are told to
+  // paste when something looks broken.
+  //
+  // Matched against the emitted CONSTANT rather than a concatenated log line:
+  // the banner is a template literal, so the built file holds
+  // `v${VERSION} active`, never the interpolated text.
+  const manifest = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+  const bundle = readFileSync(join(ROOT, 'client', 'client.js'), 'utf8')
+  const declared = /const VERSION = "([^"]+)"/.exec(bundle)
+  assert(declared !== null, 'the bundle declares no VERSION at all')
+  eq(declared[1], manifest.version, 'the bundle reports the manifest version')
+})
+
 await test('a failed engine load is shown as content, not thrown', async () => {
   __setChunkTransport(async () => {
     throw new Error('HTTP 404')
@@ -2136,7 +2242,7 @@ await test('the measured height wins over the estimate, and is capped', () => {
   // The whole point of measuring: the frame follows the document's real height
   // instead of a guess, so short content shows fully and only genuinely long
   // content scrolls.
-  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p>hi</p>' }) }])
+  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<!doctype html><p>hi</p>' }) }])
   const { env } = mount(html, { config: { maxPreviewHeight: 320 } })
   const frame = env.document.querySelector('iframe')
   const view = env.document.defaultView
@@ -2161,7 +2267,7 @@ await test('an unchanged measurement does not write the height again', () => {
   // ResizeObserver tick, so the settled height arrives repeatedly. Assigning it
   // again dirties layout for no visual result, and layout is what moves a
   // reader's scroll position when the resized block is the one they are on.
-  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p>hi</p>' }) }])
+  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<!doctype html><p>hi</p>' }) }])
   const { env } = mount(html, { config: { maxPreviewHeight: 320 } })
   const frame = env.document.querySelector('iframe')
   const view = env.document.defaultView
@@ -2213,7 +2319,7 @@ await test('the model document is the frame document, not a nested one', () => {
   // Measuring in place is what removes the cross-origin problem: the script
   // measures the document it is part of. This test pins that shape, because
   // reintroducing a nested frame would blank the preview again.
-  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p id="marker">hi</p>' }) }])
+  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<!doctype html><p id="marker">hi</p>' }) }])
   const frame = mount(html, { config: { maxPreviewHeight: 320 } }).env.document.querySelector('iframe')
 
   assert(frame.srcdoc.includes('id="marker"'), 'the model\'s markup is IN this document')
@@ -2222,7 +2328,7 @@ await test('the model document is the frame document, not a nested one', () => {
 })
 
 await test('a nonce policy blocks the model scripts while letting the measurer run', () => {
-  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p>hi</p>' }) }])
+  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<!doctype html><p>hi</p>' }) }])
   const frame = mount(html, { config: { maxPreviewHeight: 320 } }).env.document.querySelector('iframe')
   const srcdoc = frame.srcdoc
 
@@ -2246,7 +2352,7 @@ await test('a nonce policy blocks the model scripts while letting the measurer r
 })
 
 await test('turning on htmlAllowScripts drops the policy but keeps the opaque origin', () => {
-  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p>hi</p>' }) }])
+  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<!doctype html><p>hi</p>' }) }])
   const frame = mount(html, { config: { maxPreviewHeight: 320, htmlAllowScripts: true } }).env.document.querySelector('iframe')
   eq(frame.srcdoc.includes('Content-Security-Policy'), false, 'the model may run its own scripts')
   assert(!frame.getAttribute('sandbox').includes('allow-same-origin'), 'but still cannot reach the host')
@@ -2257,7 +2363,7 @@ await test('a model script is present but unauthorised, so the policy refuses it
   // document — that is expected, and the policy is what stops it. The assertion
   // that matters is about nonces, not presence: exactly one script may run, and
   // it is ours.
-  const hostile = '<p>a</p><script>parent.document.body.innerHTML="pwned"</script>'
+  const hostile = '<!doctype html><p>a</p><script>parent.document.body.innerHTML="pwned"</script>'
   const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: hostile }) }])
   const { env } = mount(html, { config: { maxPreviewHeight: 320 } })
   const frame = env.document.querySelector('iframe')
@@ -2274,7 +2380,7 @@ await test('a model script is present but unauthorised, so the policy refuses it
 })
 
 await test('a message from another window, or of another shape, is ignored', () => {
-  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p>hi</p>' }) }])
+  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<!doctype html><p>hi</p>' }) }])
   const { env } = mount(html, { config: { maxPreviewHeight: 320 } })
   const frame = env.document.querySelector('iframe')
   const view = env.document.defaultView
@@ -2297,7 +2403,7 @@ await test('a message from another window, or of another shape, is ignored', () 
 await test('disposing a preview removes its message listener', () => {
   // A leaked listener per preview would accumulate for the life of the page and
   // keep removed frames alive.
-  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p>hi</p>' }) }])
+  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<!doctype html><p>hi</p>' }) }])
   const { env, seam } = mount(html, { config: { maxPreviewHeight: 320 } })
   eq(env.document.defaultView.listenerCount(), 1, 'one listener while the preview is mounted')
   seam.dispose()
@@ -2307,7 +2413,7 @@ await test('disposing a preview removes its message listener', () => {
 await test('a measurement that never arrives leaves the estimate in place', async () => {
   // The fallback is what makes the measuring frame safe to ship: its failure
   // mode is "slightly wrong height", never "no preview".
-  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p>hi</p>' }) }])
+  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<!doctype html><p>hi</p>' }) }])
   const { env } = mount(html, { config: { maxPreviewHeight: 320 } })
   const frame = env.document.querySelector('iframe')
   const initial = frame.style.height
@@ -2318,7 +2424,7 @@ await test('a measurement that never arrives leaves the estimate in place', asyn
 
 await test('previewHeightMode picks between measured, fitted and fixed frames', async () => {
   const { estimateHeight: estimate } = await import('../src/client/renderers/html.js')
-  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p>hi</p>' }) }])
+  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<!doctype html><p>hi</p>' }) }])
   const frameOf = (config) => mount(html, { config }).env.document.querySelector('iframe')
   const fitted = estimate('<p>hi</p>', 320)
 
@@ -2338,7 +2444,7 @@ await test('previewHeightMode picks between measured, fitted and fixed frames', 
 await test('an unknown previewHeightMode falls back to measure rather than breaking', async () => {
   // A string enum cannot be validated by `typeof`, which would accept any
   // string and leave the renderer comparing against a mode that does not exist.
-  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<p>hi</p>' }) }])
+  const html = conversationFixture([{ nodeKey: 'n-1', html: codeBlockFixture({ lang: 'html', code: '<!doctype html><p>hi</p>' }) }])
   for (const mode of ['nonsense', '', 42, null]) {
     const { kit, env } = mount(html, { config: { previewHeightMode: mode } })
     eq(kit.config().previewHeightMode, 'measure', `mode ${JSON.stringify(mode)} fell back to measure`)
@@ -2499,11 +2605,62 @@ await test('the README quotes the console lines the bundle actually emits', asyn
   const emitted = run.log.filter((line) => line.startsWith('[dsh-viewer-kit]'))
   assert(emitted.length >= 4, `expected the four startup lines, saw ${emitted.length}`)
 
+  // Two segments of a log line change on their own — the block count is live,
+  // and the version belongs to the manifest rather than to the document. The
+  // README writes both as placeholders, so the comparison normalises them
+  // here; quoting the literal would make every release edit the README.
+  const placeholder = (line) =>
+    line.replace(/— \d+ code block/, '— N code block').replace(/v\d+\.\d+\.\d+(?:-[\w.]+)? active/, 'v<version> active')
+
   for (const line of emitted) {
-    // The count is live, so the README writes it as a placeholder.
-    const quoted = line.replace(/— \d+ code block/, '— N code block')
+    const quoted = placeholder(line)
     assert(readme.includes(quoted), `the README no longer quotes:\n         ${quoted}`)
   }
+})
+
+await test('no document quotes a number that a release or an edit would invalidate', () => {
+  // A document that copies the test count, the plugin version or the tarball
+  // name has to be edited on every release, and nothing notices when it is
+  // not: the number keeps looking plausible while it describes the previous
+  // build. Those facts live in the artifacts that produce them — the manifest,
+  // the bundle, the test run — and the documents point at those instead.
+  //
+  // Source line numbers are the same trade, one order of magnitude worse: they
+  // drift within an afternoon of ordinary edits, so a reader who follows one
+  // lands in the middle of an unrelated function. Cite the symbol; it does not
+  // move. Section numbers (`§5.3`) stay — they are structure, not a count.
+  //
+  // Still allowed, because they describe BEHAVIOUR rather than a build: a
+  // pixel cap, a percentage, the DSH baseline the DOM contract was read from.
+  // None of them changes when this package changes.
+  const rules = [
+    { pattern: /\d+ 项测试/, what: 'the test count' },
+    { pattern: /v\d+\.\d+\.\d+(?:-[\w.]+)? active/, what: 'the reported version' },
+    { pattern: /dsh-viewer-kit-\d+\.\d+\.\d+\.tgz/, what: 'the tarball name' },
+    { pattern: /\.(?:js|ts|tsx|css):\d/, what: 'a source line number' },
+  ]
+
+  // The guard has to be able to go red, or it is decoration.
+  eq(rules[0].pattern.test('pnpm test  # 169 项测试'), true, 'the test-count rule catches a real offender')
+  eq(rules[1].pattern.test('[dsh-viewer-kit] v0.9.1 active'), true, 'the version rule catches one too')
+  eq(rules[2].pattern.test('npm pack  # dsh-viewer-kit-0.9.1.tgz'), true, 'and the tarball rule')
+  eq(rules[3].pattern.test('see dom-seam.js:375'), true, 'and the line-number rule')
+  // And they must not fire on the facts that are allowed to be numbers.
+  for (const rule of rules) {
+    eq(rule.pattern.test('maxPreviewHeight 默认 320，视口 86%，核对基线 @deepseek-ai/dsh@0.2.0-rc.2'), false, 'behaviour is not a build fact')
+  }
+
+  const docs = ['README.md', 'AGENTS.md', 'docs/01-architecture.md', 'docs/02-renderer-authoring.md', 'docs/03-pitfalls.md']
+  /** @type {string[]} */
+  const offenders = []
+  for (const name of docs) {
+    const text = readFileSync(join(ROOT, name), 'utf8')
+    for (const rule of rules) {
+      const found = rule.pattern.exec(text)
+      if (found !== null) offenders.push(`${name} quotes ${rule.what}: ${found[0]}`)
+    }
+  }
+  eq(offenders, [], `numbers that go stale by themselves:\n       ${offenders.join('\n       ')}`)
 })
 
 await test('the shipped patch documents every option, generated from the schema', () => {
@@ -2520,7 +2677,7 @@ await test('the shipped patch documents every option, generated from the schema'
   for (const [key, value] of Object.entries(SCHEMA_DEFAULTS)) {
     assert(patch.includes(`        ${key}: ${JSON.stringify(value)}`), `cordis.patch.yml is missing "${key}"`)
   }
-  eq(Object.keys(SCHEMA_DEFAULTS).length, 10, 'ten options, and the patch documents exactly those')
+  eq(Object.keys(SCHEMA_DEFAULTS).length, 11, 'eleven options, and the patch documents exactly those')
   eq(require$schema['~standard'].validate({}).issues, undefined, 'an empty config is valid')
   const bad = require$schema['~standard'].validate({ maxPreviewHeight: 'tall' })
   assert(Array.isArray(bad.issues) && bad.issues.length > 0, 'a bad value is an issue, not a value')
@@ -2648,12 +2805,17 @@ await test('a block that keeps its switch is not rebuilt on every scan', () => {
   eq(seam.size(), 1, 'and the block is still claimed exactly once')
 })
 
-await test('the README quotes the current version and tarball name', () => {  const manifest = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+await test('the README shows the install commands the package actually produces', () => {
+  // The tarball name is `dsh-viewer-kit-<version>.tgz` and the version lives in
+  // the manifest, so the README writes the name with a placeholder: quoting the
+  // real one would mean editing the document on every release, and nothing
+  // would notice when that edit was missed. What has to hold is the SHAPE that
+  // `npm pack` produces, which the manifest's own name supplies.
+  const manifest = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
   const readme = readFileSync(join(ROOT, 'README.md'), 'utf8')
-  assert(readme.includes(`v${manifest.version} active`), `the README does not quote v${manifest.version}`)
   assert(
-    readme.includes(`dsh-viewer-kit-${manifest.version}.tgz`),
-    `the README's tarball name is not ${manifest.version} — npm pack produces dsh-viewer-kit-${manifest.version}.tgz`,
+    readme.includes(`${manifest.name}-<version>.tgz`),
+    `the README does not show the pack output as ${manifest.name}-<version>.tgz`,
   )
 })
 
@@ -2872,31 +3034,14 @@ await test('the prototype tool declares the output the tools pipeline requires',
   assert(!('isConcurrencySafe' in tool), 'the call stays exclusive by default')
 })
 
-await test('the README states the exact number of tests this file declares', () => {
-  // Counted statically rather than from `passed`, because the number cannot be
-  // known until the run completes and this check runs part-way through it — a
-  // live count would make the assertion depend on where in the file it sits.
-  //
-  // Exact, not "at least": an understated number is just as wrong as an
-  // overstated one to a reader deciding whether the project is tested. The cost
-  // is one edit whenever the suite grows, which is the point.
-  //
-  // AGENTS.md is checked by the same loop. It quotes the count in two places,
-  // and a contributor document that misstates the suite is the same defect as a
-  // README that does — with the added irony that AGENTS.md is where the rule
-  // against stale duplication is written down.
-  const source = readFileSync(new URL(import.meta.url), 'utf8')
-  const declared = (source.match(/^await test\(/gm) ?? []).length
-  let checked = 0
-  for (const name of ['README.md', 'AGENTS.md']) {
-    const text = readFileSync(join(ROOT, name), 'utf8')
-    const claims = [...text.matchAll(/(\d+) 项测试/g)]
-    for (const claim of claims) {
-      eq(Number(claim[1]), declared, `${name} says ${claim[1]} tests; this file declares ${declared}`)
-      checked += 1
-    }
-  }
-  assert(checked > 0, 'neither README.md nor AGENTS.md states a test count')
+await test('the README does not state a test count', () => {
+  // "How many tests" is answered by the test run; a document only has to say
+  // what is covered. The count was quoted here and asserted for exactness until
+  // it became an edit on every release — and, when that edit was missed, a
+  // document quietly describing a suite that no longer existed.
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8')
+  assert(!/\d+ 项测试/.test(readme), 'the README states a test count')
+  assert(/全量测试/.test(readme), 'and still says the suite runs')
 })
 
 await test('every screenshot the README shows exists, and every screenshot is shown', () => {
@@ -2996,22 +3141,23 @@ await test('every section a document refers to still exists', () => {
   // A `§5.6` that no longer resolves is the same rot as a broken file link, and
   // harder to notice: the number still looks plausible.
   //
-  // Resolved against the union of all four documents' headings, because these
+  // Resolved against the union of all the documents' headings, because these
   // files cross-reference each other freely (a checklist in 02 pointing at
   // AGENTS.md §4.1, a README pointing at architecture §5.6). That is
   // deliberately permissive: it will not catch a reference that resolves to a
   // same-numbered section in the *wrong* document, and it is a fair trade for
   // not having to model which document each reference means. The failure this
   // exists to catch is a number that resolves nowhere.
+  const docs = ['README.md', 'AGENTS.md', 'docs/01-architecture.md', 'docs/02-renderer-authoring.md', 'docs/03-pitfalls.md']
   const headings = new Set()
-  for (const name of ['README.md', 'AGENTS.md', 'docs/01-architecture.md', 'docs/02-renderer-authoring.md']) {
+  for (const name of docs) {
     for (const match of readFileSync(join(ROOT, name), 'utf8').matchAll(/^#{2,3} (\d+(?:\.\d+)*)\.?\s/gm)) {
       headings.add(match[1])
     }
   }
   /** @type {string[]} */
   const broken = []
-  for (const name of ['README.md', 'AGENTS.md', 'docs/01-architecture.md', 'docs/02-renderer-authoring.md']) {
+  for (const name of docs) {
     const text = readFileSync(join(ROOT, name), 'utf8')
     for (const match of text.matchAll(/§(\d+(?:\.\d+)*)/g)) {
       if (!headings.has(match[1])) broken.push(`${name} → §${match[1]}`)

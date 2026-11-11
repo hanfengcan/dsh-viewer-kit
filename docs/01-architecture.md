@@ -25,7 +25,7 @@
 依赖严格向下：L5 只能看见 L4 暴露的接口，L4 不知道 DOM 存在，
 L1/L3 不知道有哪些渲染器。
 
-**`RenderRequest` 在 L3 构造**（`code-block-surface.js:102` 调 `kit.buildRequest`）。
+**`RenderRequest` 在 L3 构造**（`code-block-surface.js` 调 `kit.buildRequest`）。
 L1 只读 DOM，把 `root` / `source` / `lang` / `info` / `scope` 往下传，
 自己不构造请求对象。
 
@@ -54,12 +54,12 @@ L1 只读 DOM，把 `root` / `source` / `lang` / `info` / `scope` 往下传，
 ```
 
 所以客户端的 `apply(ctx, rowConfig)` 拿到的 `rowConfig` **恒为 `undefined`**
-（`src/client/index.js:213` 仍保留了一个优先使用它的分支，见 §3.3）。
+（`src/client/index.js` 仍保留了一个优先使用它的分支，见 §3.3）。
 探针守着：`the boot wire still carries no config, so P0 is still open`。
 
 ### 2.2 CodeBlock 的 DOM —— 有两个分支
 
-`@deepseek-ai/dsh-client-ui-primitives/lib/index.js:10873-10914`。
+`@deepseek-ai/dsh-client-ui-primitives/lib/index.js`。
 **形状随 props 变**，这是 §5.4 那条认领门存在的原因：
 
 ```
@@ -78,7 +78,7 @@ L1 只读 DOM，把 `root` / `source` / `lang` / `info` / `scope` 往下传，
     <div class="<actions>">[copy]</div>         ← 只有一个按钮
 ```
 
-`readLang`（`dom-seam.js:131-138`）取 `banner.firstElementChild.firstElementChild`
+`readLang`（`dom-seam.js`）取 `banner.firstElementChild.firstElementChild`
 的 `textContent`。在第二个分支里这两层是 `infostring` 的 `<div>` 与其文本节点，
 `firstElementChild` 为 `null`，于是返回 `''` —— 块退化成「无语言 + 内容嗅探」，
 而**不是**被跳过。
@@ -87,7 +87,7 @@ L1 只读 DOM，把 `root` / `source` / `lang` / `info` / `scope` 往下传，
 
 ### 2.3 content 节点不生成盒子
 
-`CodeBlock.module.css:72-76`：
+`CodeBlock.module.css`：
 
 ```css
 /* Consumers may turn the stable content node into a viewport without changing
@@ -114,14 +114,14 @@ L1 只读 DOM，把 `root` / `source` / `lang` / `info` / `scope` 往下传，
 | `<div class="shiki">` | 已高亮，围栏闭合 |
 | `<pre class="shiki">` | 可能是流式中，**也可能**是宿主不高亮的稳定态 |
 
-判据只读 `child.tagName === 'DIV'`（`dom-seam.js:100`），不参与类名。
+判据只读 `child.tagName === 'DIV'`（`dom-seam.js`），不参与类名。
 第二种形态是二义的，`settleState` 只报告形状，由调用方结合 banner 标签消歧。
 
 ### 2.5 会话边界
 
 轨迹标签页也渲染 `.md-code-block`，但它的 bundle 不带任何 `data-chat-*` 属性，
 会话区带约 60 个。边界因此建在**祖先选择器**上
-（`dom-seam.js:61`，该常量在本文件内，不在 `dom-contract.js`）：
+（`dom-seam.js`，该常量在本文件内，不在 `dom-contract.js`）：
 
 ```
 [data-chat-flow],[data-chat-node-key],[data-chat-turn],[data-chat-group-key]
@@ -157,7 +157,7 @@ web boot 失败，而 DSH 把这种失败当致命启动错误（boot 审计只�
 
 `tests/ctx-harness.mjs` 暴露 `get` / `effect` / `on` / `provide` 四个成员，
 读别的即抛。它**比真实客户端 context 更窄**（后者混入 16 个成员，
-cordis `reflect.ts:219-222`）——加宽 harness 等于删掉那道守卫。
+cordis `reflect.ts`）——加宽 harness 等于删掉那道守卫。
 本插件实际只用到 `get` 与 `effect`；允许清单只在 `AGENTS.md` §5.5。
 
 `document` / `console` / `MutationObserver` 是浏览器全局，不在 `ctx` 上。
@@ -205,32 +205,32 @@ cordis.patch.yml ─▶ apply(ctx, config) ─▶ Config schema 校验
 ```
 
 **接缝整体推迟到配置落地之后**：`createDomSeam` 在**构造时**就挂上
-MutationObserver（`dom-seam.js:481`），所以推迟的不是一个 `scan()` 调用，
+MutationObserver（`dom-seam.js`），所以推迟的不是一个 `scan()` 调用，
 是整个接缝。首屏因此就是最终结果。
 
 配置在两侧各存一份，两份都不自己更新：
 
 | | 持有者 | 位置 | 更新的时机 |
 |---|---|---|---|
-| 宿主 | `resolveConfig` 算一次，闭包捕获 | `src/index.js:94` | 宿主半体重新激活 |
-| 浏览器 | 每次页面加载 fetch 一次 | `src/client/index.js:217` | 整页重新加载 |
+| 宿主 | `resolveConfig` 算一次，闭包捕获 | `src/index.js` | 宿主半体重新激活 |
+| 浏览器 | 每次页面加载 fetch 一次 | `src/client/index.js` | 整页重新加载 |
 
 **配置文件本身只在 boot 路径上被读**（`dsh-app-boot` 的 `loadProfile` /
 `loadOptionalPatches`），`dsh-app-boot` 与 `dsh-cordis-host-runner` 里没有针对它的
-文件监听。唯一写它的地方是 `ConfigEditor.edit()`（`dsh-config-editor/lib/index.js:69`），
+文件监听。唯一写它的地方是 `ConfigEditor.edit()`（`dsh-config-editor/lib/index.js`），
 而它**写完会自己调 `reconcileProfilePatches`**（`:125`），把变化推给 Loader：
 
 ```
-设置界面 ─▶ settings.mutate(...)            dsh-client-ui-settings/lib/client.js:1182
-             ▶ configEditor.edit(entry, …)   dsh-settings/lib/index.js:508
-             ▶ 原子写回 patch 文件           dsh-config-editor/lib/index.js:123
+设置界面 ─▶ settings.mutate(...)            dsh-client-ui-settings/lib/client.js
+             ▶ configEditor.edit(entry, …)   dsh-settings/lib/index.js
+             ▶ 原子写回 patch 文件           dsh-config-editor/lib/index.js
              ▶ reconcileProfilePatches(...)  :125
              ▶ Entry.update() → fiber.update() → apply(ctx, 新 config)   同进程重跑
 ```
 
 也就是说**宿主侧的热更通道是通的**，而本插件目前走不到它：`dsh-settings` 的
 `describe()` 用 `volatileForm(schema)` 收集表单，取不到就整条跳过该插件
-（`dsh-settings/lib/index.js:418-419`），`write()` 对没有 volatile 字段的条目
+（`dsh-settings/lib/index.js`），`write()` 对没有 volatile 字段的条目
 直接抛 `has no volatile fields`（`:505-506`）。本插件的 `Config` 没有声明任何
 `.volatile()`，所以**改配置文件需要重启 profile**。
 
@@ -258,8 +258,8 @@ apply 时（`src/index.js`），以及客户端在窗口重新获得焦点时重
 }
 ```
 
-**`createRequest` 不做归一化**（`contract.js:250`，`input.lang ?? ''`）。
-`lang` 的归一化由调用方在传入前完成（`code-block-surface.js:105` 调
+**`createRequest` 不做归一化**（`contract.js`，`input.lang ?? ''`）。
+`lang` 的归一化由调用方在传入前完成（`code-block-surface.js` 调
 `normalizeLang`）。归一化规则必须与宿主一致，否则 ```html title="x" 会
 认领出 `html title="x"` 而匹配不到任何东西：
 
@@ -275,7 +275,7 @@ key = `${scope}\0${lang}\0${source}`
 id  = `${fnv1a(key,0).toString(36)}.${fnv1a(key,0x9e3779b9).toString(36)}.${key.length.toString(36)}`
 ```
 
-`scope` 取最近的 `[data-chat-node-key]` 祖先（`dom-seam.js:79-82`）：
+`scope` 取最近的 `[data-chat-node-key]` 祖先（`dom-seam.js`）：
 同一条消息里重复的同一段代码共享视图选择，不同消息里的互不影响。
 碰撞最多导致两段不同的代码共用一个**视图选择**，不会导致内容渲染错误。
 
@@ -286,7 +286,7 @@ interface Renderer {
   id: string
   label?: string
   priority?: number          // 默认 0，越大越优先
-  match(request: RenderRequest): boolean
+  match(request: RenderRequest, config: Readonly<ViewerKitConfig>): boolean
   create(host: RenderHost): RendererInstance | null
 }
 ```
@@ -294,18 +294,28 @@ interface Renderer {
 `match` 与 `create` 分开：前者是纯判定、可缓存、可重复调用；
 后者有副作用且必须可失败。
 
+`match` 拿得到解析后的配置，因为"该不该认领"可以合法地取决于一个选项 ——
+`html` 渲染器就是这样用 `htmlPreviewRequiresDocument` 决定一个片段要不要预览的
+（判据是 `<!doctype html>` / `<html>` / `<head>` / `<body>` 出现其一）。
+配置变化经 `invalidate()` 清掉协商缓存，所以缓存不会撒谎。
+
+**认领的分档**由 `classify()` 一处决定（`renderers/html.js`）：围栏名在的时候
+名字说了算，围栏名不在的时候看内容 —— 而**没名字时门槛更高**，必须以文档元素开头。
+理由见 [03-pitfalls.md](03-pitfalls.md) §14：宿主只在有语法高亮器的语言上写围栏名，
+所以 `svg` 这类围栏的名字根本不在 DOM 里，只能从内容认出来。
+
 `RenderHost` 交给渲染器的东西很窄：建节点、挂载、清空容器、读尺寸上限、
 上报致命错误、读配置。**`config()` 返回的是 Kit 内部的活对象**
-（`kit.js:205`，未冻结未拷贝）；真正返回冻结快照的是 `kit.config()`（`:248`）。
+（`kit.js`，未冻结未拷贝）；真正返回冻结快照的是 `kit.config()`（`:248`）。
 
-`viewsOf`（`kit.js:152-158`）把渲染器自己的视图里 id 为 `'code'` 的滤掉，
+`viewsOf`（`kit.js`）把渲染器自己的视图里 id 为 `'code'` 的滤掉，
 再补上宿主自己的 `CODE_VIEW`；渲染器一个视图都不给时，标签退化为 `'source'`。
 所以渲染器只需要实现增强视图，**`'code'` 是零成本**的：切回代码只是把模式属性
 改回去并清空自有容器，原生 `<pre>` 原封不动地重新露出来。
 
 ### 4.4 协商算法
 
-`negotiate`（`kit.js:111-143`）的五步，顺序有意义：
+`negotiate`（`kit.js`）的五步，顺序有意义：
 
 ```
 1. !config.enabled                                   → null（总开关）
@@ -313,7 +323,7 @@ interface Renderer {
 3. 查 negotiationCache[request.id]
 4. 遍历 sorted()：
      disabledRendererIds.includes(renderer.id)       → continue（渲染器 id 档）
-     renderer.match(request) 抛错                    → onError + continue（不炸接缝）
+     renderer.match(request, config) 抛错            → onError + continue（不炸接缝）
      第一个 === true 的即胜出
 5. 写入缓存
 ```
@@ -327,7 +337,7 @@ interface Renderer {
 胜出者 `create` 失败时**不回退到次优渲染器** —— 静默换一个会让用户困惑，
 明确的不渲染更可预测。
 
-**`defaultView()` 是 Kit 级的**（`kit.js:164-166`，返回 `'preview'` 或 `'code'`），
+**`defaultView()` 是 Kit 级的**（`kit.js`，返回 `'preview'` 或 `'code'`），
 与渲染器无关。渲染器若不认 `'preview'`，`pickInitialView` 会退到 `views[0].id`。
 
 ### 4.5 视图状态
@@ -344,13 +354,13 @@ value = 'code' | 渲染器自定义 viewId
 会实际写一个探针键，因为隐私窗口和内嵌 webview 暴露对象却仍会在写时抛）。
 存储损坏或写满都只丢跨刷新的记忆，不影响渲染。
 
-**只有用户主动点的视图才被记住**（`code-block-surface.js:311` 的 `byUser`）。
+**只有用户主动点的视图才被记住**（`code-block-surface.js` 的 `byUser`）。
 首次打开的视图由 `defaultToPreview` 推导，把它记下来会让那个设置在第一次
 使用后就被冻结。
 
 `kit.subscribe` **不随视图变化触发** —— 它只在 `invalidate()` 时被叫，
 而 `invalidate()` 由 `register` / 注销 / `setConfig` 触发。视图变化的事件发到
-`view-state` 自己的 listener 集（`view-state.js:94-96`），Kit 不转发。
+`view-state` 自己的 listener 集（`view-state.js`），Kit 不转发。
 
 ---
 
@@ -382,7 +392,7 @@ value = 'code' | 渲染器自定义 viewId
 
 ### 5.2 已认领块的再评估
 
-`surfaces.has(element)` 时（`dom-seam.js:306-329`），认领只在**两个条件同时成立**
+`surfaces.has(element)` 时（`dom-seam.js`），认领只在**两个条件同时成立**
 时保留：
 
 ```
@@ -396,7 +406,7 @@ readSource(content).length === claimed.bytes   ← 源码还是认领时那一�
 
 ### 5.3 认领门
 
-`evaluate` 的判断顺序（`dom-seam.js:304-375`）：
+`evaluate` 的判断顺序（`dom-seam.js`）：
 
 ```
 disposed                                  → 直接返回
@@ -416,7 +426,7 @@ generic = isGenericLabel(label)
 **① 通用标签** —— banner 显示的是本地化兜底文案，说明宿主对这个围栏没有高亮器，
 **`<div class="shiki">` 外壳永远不会出现**，等它会等到重试预算耗尽。
 这类块**当场认领**，`lang` 置空交给渲染器按内容判断。判断依据只有
-`GENERIC_LABELS`（`dom-seam.js:29-41`，中英文各若干），不看内容。
+`GENERIC_LABELS`（`dom-seam.js`，中英文各若干），不看内容。
 
 **② 高亮态** —— 形态差异本身就是信号，围栏闭合时那次子元素替换是可见的
 `childList` 变更。
@@ -424,7 +434,7 @@ generic = isGenericLabel(label)
 **③ 真标签 + plain 正文** —— 宿主给了一个它不打算高亮的语言名，形态永不改变。
 只有这一支等 `hasSettled`。
 
-`hasSettled`（`dom-seam.js:266-280`）：
+`hasSettled`（`dom-seam.js`）：
 
 ```
 bytes = source.length                      （UTF-16 code unit，不是字节）
@@ -442,7 +452,7 @@ now - seen.since < SETTLE_QUIET_MS         → false        （= PLAIN_SETTLE_MS
 
 ### 5.4 重试预算
 
-`schedule`（`dom-seam.js:415-429`）在 `PLAIN_SETTLE_MS`（300ms）后重跑
+`schedule`（`dom-seam.js`）在 `PLAIN_SETTLE_MS`（300ms）后重跑
 `evaluate`，次数上限 `MAX_QUIET_RETRIES`（100，约 30s）。同一个元素已有定时器时
 不重复排。
 
@@ -488,6 +498,8 @@ content 节点缺失、源码为空。
 | 围栏名在 `disabledRendererIds` 里 | 整块否决 | 无 |
 | 超 `maxSourceBytes` | 认领后 `withinLimits` 为假 → 返回 null | 无 |
 | 无渲染器认领 | 返回 null | 无 |
+| `html` 围栏没有文档标志（`htmlPreviewRequiresDocument`） | 该渲染器不认领，块回落原生代码 | 无 |
+| 围栏名不在 DOM 里（宿主无该语言的高亮器），内容也不是文档 | 该渲染器不认领，块回落原生代码 | 无 |
 | `create` 返回 null 或抛错 | 返回 null | `console.error` |
 | 只有 `code` 一个视图 | dispose 实例，返回 null | 无 |
 | `banner.lastElementChild` 为 null | dispose 实例，返回 null | 无 |
@@ -512,7 +524,7 @@ content 节点缺失、源码为空。
 - 虚拟列表自己的补偿在 `scrollDirection === "backward"` 时**故意不修正** ——
   往上滚时修正会跟读者自己的滚动打架。
 
-`keepingScrollPosition(node, change)`（`scroll-guard.js:127-168`）：
+`keepingScrollPosition(node, change)`（`scroll-guard.js`）：
 
 ```
 scroller = 向上找 clientHeight > 0 && scrollHeight > clientHeight 的祖先
@@ -538,7 +550,7 @@ scroller.scrollTop = clamp(0, scrollHeight - clientHeight, offset + delta)
 
 补偿路径上共 **3 次** `getBoundingClientRect`（`:132` `:133` `:150`），
 外加 `scrollTop` / `scrollHeight` / `clientHeight` 三次布局读。它包住
-**整次视图切换**（`code-block-surface.js:322`）而不是切换里的每一次 DOM 写。
+**整次视图切换**（`code-block-surface.js`）而不是切换里的每一次 DOM 写。
 
 ---
 
@@ -551,8 +563,8 @@ scroller.scrollTop = clamp(0, scrollHeight - clientHeight, offset + delta)
 
 | `previewHeightMode` | `sandbox` | 决定于 |
 |---|---|---|
-| `measure`（**默认**） | `allow-scripts` | **无条件** —— 测量脚本就是文档本身，它自报内容高度（`html.js:304`） |
-| `fit` / `fixed` | `htmlAllowScripts ? 'allow-scripts' : ''` | 只有 `htmlAllowScripts`（`html.js:316`） |
+| `measure`（**默认**） | `allow-scripts` | **无条件** —— 测量脚本就是文档本身，它自报内容高度（`html.js`） |
+| `fit` / `fixed` | `htmlAllowScripts ? 'allow-scripts' : ''` | 只有 `htmlAllowScripts`（`html.js`） |
 
 **任何配置下都不同时给 `allow-scripts` 与 `allow-same-origin`**，所以文档始终是
 不透明源，读不到宿主的 DOM / cookie / storage。

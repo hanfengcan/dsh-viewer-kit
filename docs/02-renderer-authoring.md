@@ -50,8 +50,10 @@ export function createMermaidRenderer(t) {
     label: 'Mermaid',
     priority: 5,                       // 默认 0；越大越优先
 
-    // 认领判定：必须便宜、无副作用
-    match(request) {
+    // 认领判定：必须便宜、无副作用。
+    // 第二个参数是解析后的配置，只有在"该不该认领"取决于一个选项时才用得上
+    // （HTML 渲染器的 htmlPreviewRequiresDocument 就是这样）。
+    match(request, config) {
       return request.lang === 'mermaid'
     },
 
@@ -181,7 +183,7 @@ enter(viewId) {
 ## 4. 优先级与竞争
 
 ```
-候选 = 所有 renderer 里 match(request) 为 true 的
+候选 = 所有 renderer 里 match(request, config) 为 true 的
 胜出 = 候选按 (priority 降序, id 升序) 的第一个
 ```
 

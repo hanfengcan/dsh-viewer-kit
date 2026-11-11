@@ -15,8 +15,8 @@
 
 | 围栏 | 切换 | 渲染结果是怎么来的 |
 |---|---|---|
-| `html` `svg` | 预览 / 代码 | 沙箱 iframe 真实渲染，默认禁脚本；可**放大**成弹窗看全文 |
-| `csv` `tsv` | 表格 / 代码 | 自己实现 RFC 4180 解析，DOM 建表（不解析标记）；表头吸顶 |
+| `html` `svg` | 预览 / 代码 | 沙箱 iframe 真实渲染，默认禁脚本；可**放大**成弹窗看全文。**只认领整篇文档**，举例用的片段保持代码 |
+| `csv` | 表格 / 代码 | 自己实现 RFC 4180 解析，DOM 建表（不解析标记）；表头吸顶 |
 | `json` | 表格 / 代码 | 只认**对象数组**；对象不是表 |
 | `markdown` | 表格 / 代码 | 只认**整个围栏就是一张管道表**，否则原样 |
 | `echarts` `chart` | 图表 / 代码 | 模型只写 option 的 JSON，引擎按需加载 |
@@ -149,6 +149,7 @@ and do not spend effort on polish.
 | `maxTableHeight` | `480` | 表格超过这个高度就开始**框内滚动**，表头吸顶 |
 | `chartHeight` | `360` | 图表高度。必须 > 0，否则画布渲染成 0 高 |
 | `htmlAllowScripts` | `false` | 允许预览里的 HTML 执行**它自己的**脚本 |
+| `htmlPreviewRequiresDocument` | `true` | `html` 围栏只在带文档标志时预览 —— 见下 |
 | `maxSourceBytes` | `262144` | 超过这个大小的源码保持原生代码块 |
 | `disabledRendererIds` | `[]` | 关掉个别渲染器，**两层语义** —— 见下 |
 | `prototypeStyle` | `""` | 替换原型模式注入的风格规范；空串 = 用内置的那份 —— 见上 |
@@ -180,6 +181,24 @@ and do not spend effort on polish.
 两者会重叠：`['csv']` 和 `['table']` 都能关掉 CSV 表格，但原因不同。真正分家的是
 **没有同名渲染器的语言** —— `['json']` 会让所有 `json` 块原样保留，而这是"别让 ECharts
 option 被表格渲染器认领"却不点名 `echarts` 的唯一办法。
+
+### 什么样的 `html` 围栏才会被预览
+
+同一个 ```html 围栏既可能是一整篇要看的页面，也可能只是解释里引的一段标记。后者预览出来
+是一个几乎空白的框，还多出一组视图切换，所以块里必须出现**文档标志**之一才会被认领：
+
+`<!doctype html>` · `<html>` · `<head>` · `<body>`
+
+（`<!doctype html>` 与 `<head>` 单独出现也算 —— 手写的 HTML 常见写法是
+doctype + 一个 `<style>` 块 + 标记，靠浏览器补出隐含的 body。）
+
+没有标志的块**保持原生代码块**，连"预览"按钮都不会出现。想恢复"每个 `html` 围栏都预览"，
+把 `htmlPreviewRequiresDocument` 设成 `false`。
+
+`svg` 围栏不受这条规则约束：`<svg>` 元素本身就是整篇文档，所以只要围栏里是 SVG 就预览。
+而且 DSH **没有 `svg` 的高亮器** —— banner 里写的是通用文案「代码块」，围栏名压根不在
+DOM 里。插件因此**按内容判定**：`svg` 围栏靠"第一个元素是不是 `<svg>`"认出来。
+无名围栏的门槛更高（必须**以**文档元素开头），否则 JSON 字符串里一个 `<body>` 就会误伤。
 
 ### 关于 `htmlAllowScripts`
 
@@ -219,8 +238,8 @@ option 被表格渲染器认领"却不点名 `echarts` 的唯一办法。
 dsh plugin add file:E:\path\to\dsh-viewer-kit
 
 # B. 从 tarball（适合分发给别人 / 内网）
-npm pack                       # 产出 dsh-viewer-kit-0.9.0.tgz
-dsh plugin add file:.\dsh-viewer-kit-0.9.0.tgz
+npm pack                       # 产出 dsh-viewer-kit-<version>.tgz
+dsh plugin add file:.\dsh-viewer-kit-<version>.tgz
 ```
 
 装好后**重启 profile**，让宿主半体生效。
@@ -238,7 +257,7 @@ dsh plugin add file:.\dsh-viewer-kit-0.9.0.tgz
 [dsh-viewer-kit] renderers: html, echarts, table
 [dsh-viewer-kit] waiting for the host config route
 [dsh-viewer-kit] config: default view=preview, html scripts=off, max preview height=320px, chart height=360px (from defaults, host answered 404)
-[dsh-viewer-kit] v0.9.0 active — N code block(s) enhanced
+[dsh-viewer-kit] v<version> active — N code block(s) enhanced
 ```
 
 > 渲染器按**优先级**排列而非注册顺序：`html` 10 > `echarts` 8 > `table` 5。
@@ -263,7 +282,7 @@ __DSH_VIEWER_KIT__.diagnose()
 
 ```powershell
 pnpm install
-pnpm run check        # 类型检查 → 构建 → 161 项测试 → 产物激活复现 → 宿主契约探针
+pnpm run check        # 类型检查 → 构建 → 全量测试 → 产物激活复现 → 宿主契约探针
 pnpm run release      # check + 打包自检，完整发布门禁
 ```
 

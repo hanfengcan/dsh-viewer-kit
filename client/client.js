@@ -215,8 +215,11 @@ const FOLLOWING_TAIL_SELECTOR = "[data-chat-following-tail]";
 * @property {string} id Unique; also the deterministic tie-break key.
 * @property {string} [label] Human name for diagnostics.
 * @property {number} [priority] Higher wins. Default 0.
-* @property {(request: RenderRequest) => boolean} match Claim test. Must be
-*   cheap and side-effect free — the host may call it repeatedly.
+* @property {(request: RenderRequest, config: Readonly<ViewerKitConfig>) => boolean} match
+*   Claim test. Must be cheap and side-effect free — the host may call it
+*   repeatedly. `config` is the resolved kit config, handed in because a
+*   renderer's claim can legitimately depend on an option; treat it as
+*   read-only.
 * @property {(host: RenderHost) => RendererInstance | null} create Build an
 *   instance, or return null to decline (too large, unsupported shape, …).
 */
@@ -261,6 +264,10 @@ const FOLLOWING_TAIL_SELECTOR = "[data-chat-following-tail]";
 *   zero.
 * @property {boolean} [htmlAllowScripts] Let previewed HTML run scripts inside
 *   an opaque-origin sandbox. **Off by default**; see docs/01-architecture.md §8.
+* @property {boolean} [htmlPreviewRequiresDocument] Claim an `html` fence only
+*   when its source carries a document marker (`<!doctype html>`, `<html>`,
+*   `<head>`, `<body>`). **On by default**; `svg` is never affected. A fragment
+*   quoted inside an explanation keeps its native code block.
 * @property {boolean} [defaultToPreview] Open a freshly seen item in its
 *   enhanced view instead of the code view. **On by default.**
 * @property {string} [prototypeStyle] Style specification injected for the one
@@ -1347,6 +1354,8 @@ const DEFAULT_PROTOTYPE_STYLE = [
 	"",
 	"## Structure",
 	"Every style lives in ONE <style> block. No inline style attributes.",
+	"Emit a complete document that begins with <!doctype html>. A fence the",
+	"preview cannot recognise as a document is shown as source, not rendered.",
 	"",
 	"This is a wireframe, not a visual design: get hierarchy and layout right,",
 	"and do not spend effort on polish."
@@ -1447,6 +1456,21 @@ const FIELDS = [
 			"own and never paired with allow-same-origin, so the document cannot",
 			"reach the host DOM, cookies, or storage. What changes is that merely",
 			"rendering a block can start that block's network requests."
+		].join("\n")
+	},
+	{
+		key: "htmlPreviewRequiresDocument",
+		kind: "boolean",
+		fallback: true,
+		doc: [
+			"Preview an `html` fence only when its source declares a document:",
+			"`<!doctype html>`, `<html>`, `<head>` or `<body>`. An `svg` fence is",
+			"never affected, because the `<svg>` element IS the document.",
+			"An `html` fence with none of those markers is a fragment quoted inside",
+			"an explanation. Previewed, it is a nearly empty frame with a view switch",
+			"that invites the reader to look at nothing, so such a block keeps the",
+			"native code block instead.",
+			"Set false to preview every `html` fence regardless of shape."
 		].join("\n")
 	},
 	{
@@ -1924,6 +1948,10 @@ function createEChartsRenderer(t) {
 * The reference implementation of the renderer contract, and the smallest
 * useful one: it claims two fence languages and adds exactly one view.
 *
+* It claims an `html` fence only when the source declares a document (see
+* `DOCUMENT_MARKER`): the same fence name is also used to quote a snippet,
+* which should stay source.
+*
 * Security notes live in docs/01-architecture.md §8. The short version: the
 * preview is always an `<iframe>` with a `sandbox` attribute, and the two
 * attributes that would matter — `allow-scripts` and `allow-same-origin` —
@@ -1938,6 +1966,103 @@ const LANGS = Object.freeze({
 	svg: "SVG"
 });
 /**
+* What makes an `html` fence a DOCUMENT rather than a fragment of one.
+*
+* A model writes both kinds of `html` fence: a page meant to be looked at, and
+* a snippet quoted inside an explanation. Only the first is worth a preview —
+* a fragment renders as a nearly empty frame and puts a view switch on a block
+* that was there to be read.
+*
+* `<!doctype html>` and `<head>` count even without `<html>`/`<body>`, because
+* the usual shape of a hand-written page here is doctype plus one `<style>`
+* block plus markup, which the parser places in an implied body. Requiring the
+* two optional tags would send those real pages back to plain source.
+*/
+const DOCUMENT_MARKER = /<!doctype\s+html|<html[\s>]|<head[\s>]|<body[\s>]/i;
+/**
+* Leading comments and an XML declaration.
+*
+* They say nothing about what a document is, so the search for its first
+* element skips them. The doctype is left alone — that one does say
+* something.
+*/
+function stripLeadingNoise(source) {
+	let rest = source.trimStart();
+	for (;;) {
+		const next = rest.replace(/^<!--[\s\S]*?-->\s*/, "").replace(/^<\?[\s\S]*?\?>\s*/, "");
+		if (next === rest) return rest;
+		rest = next;
+	}
+}
+/**
+* Everything before the first element: the leading noise and the doctype.
+*
+* @param {string} source
+* @returns {string}
+*/
+function stripPrologue(source) {
+	return stripLeadingNoise(source).replace(/^<!doctype[^>]*>\s*/i, "");
+}
+/**
+* What a source opens with, judged by its first element.
+*
+* The fence name is not always available. A code block's banner carries the
+* language only for the languages the host has a grammar for; every other
+* fence shows a generic label instead, and the name never reaches the DOM.
+* When that happens the source is the only evidence there is — the same rule
+* the chart renderer follows.
+*
+* @param {string} source
+* @returns {'html' | 'svg' | null} null when the source opens with neither
+*/
+function documentKind(source) {
+	const rest = stripLeadingNoise(source);
+	if (/^<!doctype\s+html/i.test(rest)) return "html";
+	const opening = /^<([a-z][a-z0-9-]*)/i.exec(rest.replace(/^<!doctype[^>]*>\s*/i, ""));
+	if (opening === null) return null;
+	const name = opening[1].toLowerCase();
+	if (name === "svg") return "svg";
+	if (name === "html" || name === "head" || name === "body") return "html";
+	return null;
+}
+/**
+* @param {string} source
+* @returns {boolean}
+*/
+function looksLikeDocument(source) {
+	return DOCUMENT_MARKER.test(source);
+}
+/**
+* What a request holds, as a document.
+*
+* The fence name is the authority when the host had one to give: `svg` is a
+* drawing, `html` is a page — unless the page is really a fragment quoted
+* inside an explanation, which is what the document marker decides. A drawing
+* is a document too, so an SVG source is recognised even in a fence named for
+* HTML, and rendered as the drawing it is.
+*
+* When the name is missing the source is read for what it opens with, and the
+* bar is higher: with no name to go by, only a source that OPENS like a
+* document counts. A marker anywhere in the text would fire on a JSON string
+* or a shell command that merely mentions `<body>`.
+*
+* @param {import('../contract.js').RenderRequest} request
+* @param {Readonly<import('../contract.js').ViewerKitConfig>} [config]
+* @returns {'html' | 'svg' | null} null when this is not a document
+*/
+function classify(request, config) {
+	const { lang, source } = request;
+	const opens = documentKind(source);
+	if (lang === "svg") return "svg";
+	if (lang === "html") {
+		if (config?.htmlPreviewRequiresDocument === false) return opens === "svg" ? "svg" : "html";
+		if (opens === "svg") return "svg";
+		return looksLikeDocument(source) ? "html" : null;
+	}
+	if (lang !== "") return null;
+	return opens;
+}
+/**
 * How much of the viewport height an enlarged preview may occupy.
 *
 * 0.86 leaves room for the dialog's own title bar plus a strip of the page
@@ -1950,6 +2075,32 @@ const DIALOG_VIEWPORT_FRACTION = .86;
 function withCharset(source) {
 	if (/<meta[^>]+charset\s*=/i.test(source)) return source;
 	return `<meta charset="utf-8">\n${source}`;
+}
+/**
+* The markup a previewed source contributes to its frame.
+*
+* `srcdoc` is always parsed as HTML, and an SVG source is XML. Its prologue
+* has to go: the `<?xml …?>` declaration is a bogus comment in HTML, and it
+* swallows the markup behind it, while a `<!DOCTYPE svg …>` would switch the
+* HTML parser into quirks mode.
+*
+* @param {string} source
+* @param {'html' | 'svg'} kind
+* @returns {string}
+*/
+function previewSource(source, kind) {
+	return kind === "svg" ? stripPrologue(source) : source;
+}
+/**
+* The document a previewed source is loaded as, when nothing measures it.
+*
+* @param {string} source
+* @param {'html' | 'svg'} kind
+* @returns {string}
+*/
+function previewDocument(source, kind) {
+	if (kind !== "svg") return withCharset(source);
+	return `<!doctype html><meta charset="utf-8">\n${previewSource(source, kind)}`;
 }
 /** Vertical padding a rendered document has around its content. */
 const FRAME_PADDING = 72;
@@ -2115,12 +2266,19 @@ function createHtmlRenderer(t) {
 		id: "html",
 		label: "HTML",
 		priority: 10,
-		match(request) {
-			return request.lang === "html" || request.lang === "svg";
+		match(request, config) {
+			return classify(request, config) !== null;
 		},
 		create(host) {
 			const { request, limits, document: doc, mount } = host;
 			const config = host.config();
+			/**
+			* What this block is, as a document.
+			*
+			* `create` is only reached for a request `match` accepted, so the kind
+			* is settled by then; the fallback is for the impossible case.
+			*/
+			const kind = classify(request, config) ?? "html";
 			const view = doc.defaultView ?? globalThis;
 			/** @type {HTMLIFrameElement | null} */
 			let frame = null;
@@ -2169,12 +2327,12 @@ function createHtmlRenderer(t) {
 				if (mode === "measure") {
 					frame.setAttribute("sandbox", "allow-scripts");
 					frame.style.height = `${initial}px`;
-					frame.srcdoc = buildMeasuredDocument(request.source, frameId, nonce, config.htmlAllowScripts);
+					frame.srcdoc = buildMeasuredDocument(previewSource(request.source, kind), frameId, nonce, config.htmlAllowScripts);
 					view.addEventListener?.("message", onMessage);
 				} else {
 					frame.setAttribute("sandbox", config.htmlAllowScripts ? "allow-scripts" : "");
 					frame.style.height = `${initial}px`;
-					frame.srcdoc = withCharset(request.source);
+					frame.srcdoc = previewDocument(request.source, kind);
 				}
 				mount(frame);
 				if (mode === "measure") setTimeout(() => {
@@ -2266,7 +2424,7 @@ function createHtmlRenderer(t) {
 				dialogFrame.setAttribute("sandbox", config.previewHeightMode === "measure" ? "allow-scripts" : config.htmlAllowScripts ? "allow-scripts" : "");
 				const cap = dialogCap();
 				dialogFrame.style.height = `${Math.min(cap, estimateHeight(request.source, cap))}px`;
-				dialogFrame.srcdoc = config.previewHeightMode === "measure" ? buildMeasuredDocument(request.source, frameId, nonce, config.htmlAllowScripts) : withCharset(request.source);
+				dialogFrame.srcdoc = config.previewHeightMode === "measure" ? buildMeasuredDocument(previewSource(request.source, kind), frameId, nonce, config.htmlAllowScripts) : previewDocument(request.source, kind);
 				dialog.appendChild(bar);
 				dialog.appendChild(dialogFrame);
 				doc.body.appendChild(dialog);
@@ -2289,7 +2447,7 @@ function createHtmlRenderer(t) {
 			return {
 				views: [{
 					id: "preview",
-					label: LANGS[request.lang] ?? "Preview"
+					label: LANGS[kind] ?? "Preview"
 				}],
 				expand: {
 					toggle: () => {
@@ -2523,7 +2681,7 @@ function createKit(options = {}) {
 				if (config.disabledRendererIds.includes(renderer.id)) continue;
 				let claimed = false;
 				try {
-					claimed = renderer.match(request) === true;
+					claimed = renderer.match(request, config) === true;
 				} catch (error) {
 					onError(error, {
 						rendererId: renderer.id,
@@ -3474,7 +3632,20 @@ const STYLES = `
 * @module client
 */
 const NAMESPACE = "dsh-viewer-kit";
-const VERSION = "0.9.0";
+/**
+* The version this bundle reports.
+*
+* A duplicate of `package.json`'s, deliberately: the build config cannot read
+* the manifest — the project's tsconfig excludes Node types, so a
+* `readFileSync` there would not type-check — and a value the build cannot
+* see is one less thing that can go stale unnoticed.
+*
+* `tests/run.mjs` asserts this equals the manifest's, so a release that bumps
+* one and forgets the other fails the suite instead of shipping a bundle that
+* reports the wrong version. The same trade-off, and the same guard, as the
+* package name in `tsdown.config.ts`.
+*/
+const VERSION = "0.9.1";
 /**
 * Handle to the live activation, so a second `apply` can retire the first.
 * See the guard inside `apply`.

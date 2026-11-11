@@ -36,7 +36,21 @@ import { createTranslator } from './locale.js'
 import { installStyles } from './styles.js'
 
 const NAMESPACE = 'dsh-viewer-kit'
-const VERSION = '0.9.0'
+
+/**
+ * The version this bundle reports.
+ *
+ * A duplicate of `package.json`'s, deliberately: the build config cannot read
+ * the manifest — the project's tsconfig excludes Node types, so a
+ * `readFileSync` there would not type-check — and a value the build cannot
+ * see is one less thing that can go stale unnoticed.
+ *
+ * `tests/run.mjs` asserts this equals the manifest's, so a release that bumps
+ * one and forgets the other fails the suite instead of shipping a bundle that
+ * reports the wrong version. The same trade-off, and the same guard, as the
+ * package name in `tsdown.config.ts`.
+ */
+const VERSION = '0.9.1'
 
 /**
  * Handle to the live activation, so a second `apply` can retire the first.

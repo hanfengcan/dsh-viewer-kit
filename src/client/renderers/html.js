@@ -4,6 +4,10 @@
  * The reference implementation of the renderer contract, and the smallest
  * useful one: it claims two fence languages and adds exactly one view.
  *
+ * It claims an `html` fence only when the source declares a document (see
+ * `DOCUMENT_MARKER`): the same fence name is also used to quote a snippet,
+ * which should stay source.
+ *
  * Security notes live in docs/01-architecture.md §8. The short version: the
  * preview is always an `<iframe>` with a `sandbox` attribute, and the two
  * attributes that would matter — `allow-scripts` and `allow-same-origin` —
@@ -15,6 +19,111 @@
 
 /** @type {Readonly<Record<string, string>>} */
 const LANGS = Object.freeze({ html: 'HTML', svg: 'SVG' })
+
+/**
+ * What makes an `html` fence a DOCUMENT rather than a fragment of one.
+ *
+ * A model writes both kinds of `html` fence: a page meant to be looked at, and
+ * a snippet quoted inside an explanation. Only the first is worth a preview —
+ * a fragment renders as a nearly empty frame and puts a view switch on a block
+ * that was there to be read.
+ *
+ * `<!doctype html>` and `<head>` count even without `<html>`/`<body>`, because
+ * the usual shape of a hand-written page here is doctype plus one `<style>`
+ * block plus markup, which the parser places in an implied body. Requiring the
+ * two optional tags would send those real pages back to plain source.
+ */
+const DOCUMENT_MARKER = /<!doctype\s+html|<html[\s>]|<head[\s>]|<body[\s>]/i
+
+/**
+ * Leading comments and an XML declaration.
+ *
+ * They say nothing about what a document is, so the search for its first
+ * element skips them. The doctype is left alone — that one does say
+ * something.
+ */
+function stripLeadingNoise(source) {
+  let rest = source.trimStart()
+  for (;;) {
+    const next = rest.replace(/^<!--[\s\S]*?-->\s*/, '').replace(/^<\?[\s\S]*?\?>\s*/, '')
+    if (next === rest) return rest
+    rest = next
+  }
+}
+
+/**
+ * Everything before the first element: the leading noise and the doctype.
+ *
+ * @param {string} source
+ * @returns {string}
+ */
+function stripPrologue(source) {
+  return stripLeadingNoise(source).replace(/^<!doctype[^>]*>\s*/i, '')
+}
+
+/**
+ * What a source opens with, judged by its first element.
+ *
+ * The fence name is not always available. A code block's banner carries the
+ * language only for the languages the host has a grammar for; every other
+ * fence shows a generic label instead, and the name never reaches the DOM.
+ * When that happens the source is the only evidence there is — the same rule
+ * the chart renderer follows.
+ *
+ * @param {string} source
+ * @returns {'html' | 'svg' | null} null when the source opens with neither
+ */
+export function documentKind(source) {
+  const rest = stripLeadingNoise(source)
+  if (/^<!doctype\s+html/i.test(rest)) return 'html'
+  const opening = /^<([a-z][a-z0-9-]*)/i.exec(rest.replace(/^<!doctype[^>]*>\s*/i, ''))
+  if (opening === null) return null
+  const name = opening[1].toLowerCase()
+  if (name === 'svg') return 'svg'
+  if (name === 'html' || name === 'head' || name === 'body') return 'html'
+  return null
+}
+
+/**
+ * @param {string} source
+ * @returns {boolean}
+ */
+export function looksLikeDocument(source) {
+  return DOCUMENT_MARKER.test(source)
+}
+
+/**
+ * What a request holds, as a document.
+ *
+ * The fence name is the authority when the host had one to give: `svg` is a
+ * drawing, `html` is a page — unless the page is really a fragment quoted
+ * inside an explanation, which is what the document marker decides. A drawing
+ * is a document too, so an SVG source is recognised even in a fence named for
+ * HTML, and rendered as the drawing it is.
+ *
+ * When the name is missing the source is read for what it opens with, and the
+ * bar is higher: with no name to go by, only a source that OPENS like a
+ * document counts. A marker anywhere in the text would fire on a JSON string
+ * or a shell command that merely mentions `<body>`.
+ *
+ * @param {import('../contract.js').RenderRequest} request
+ * @param {Readonly<import('../contract.js').ViewerKitConfig>} [config]
+ * @returns {'html' | 'svg' | null} null when this is not a document
+ */
+function classify(request, config) {
+  const { lang, source } = request
+  const opens = documentKind(source)
+  if (lang === 'svg') return 'svg'
+  if (lang === 'html') {
+    // The shipped rule applies when no config is handed in, so a renderer used
+    // outside the Kit (a test, a future host surface) behaves the same.
+    if (config?.htmlPreviewRequiresDocument === false) return opens === 'svg' ? 'svg' : 'html'
+    if (opens === 'svg') return 'svg'
+    return looksLikeDocument(source) ? 'html' : null
+  }
+  if (lang !== '') return null
+  return opens
+}
 
 /**
  * How much of the viewport height an enlarged preview may occupy.
@@ -30,6 +139,34 @@ const DIALOG_VIEWPORT_FRACTION = 0.86
 function withCharset(source) {
   if (/<meta[^>]+charset\s*=/i.test(source)) return source
   return `<meta charset="utf-8">\n${source}`
+}
+
+/**
+ * The markup a previewed source contributes to its frame.
+ *
+ * `srcdoc` is always parsed as HTML, and an SVG source is XML. Its prologue
+ * has to go: the `<?xml …?>` declaration is a bogus comment in HTML, and it
+ * swallows the markup behind it, while a `<!DOCTYPE svg …>` would switch the
+ * HTML parser into quirks mode.
+ *
+ * @param {string} source
+ * @param {'html' | 'svg'} kind
+ * @returns {string}
+ */
+function previewSource(source, kind) {
+  return kind === 'svg' ? stripPrologue(source) : source
+}
+
+/**
+ * The document a previewed source is loaded as, when nothing measures it.
+ *
+ * @param {string} source
+ * @param {'html' | 'svg'} kind
+ * @returns {string}
+ */
+function previewDocument(source, kind) {
+  if (kind !== 'svg') return withCharset(source)
+  return `<!doctype html><meta charset="utf-8">\n${previewSource(source, kind)}`
 }
 
 /** Vertical padding a rendered document has around its content. */
@@ -220,13 +357,23 @@ export function createHtmlRenderer(t) {
     label: 'HTML',
     priority: 10,
 
-    match(request) {
-      return request.lang === 'html' || request.lang === 'svg'
+    match(request, config) {
+      // The fence name, when the host had one to give; the source, when it did
+      // not. `svg` is a document root in its own right — the `<svg>` element is
+      // the whole drawing — while `html` is a document only when it says so.
+      return classify(request, config) !== null
     },
 
     create(host) {
       const { request, limits, document: doc, mount } = host
       const config = host.config()
+      /**
+       * What this block is, as a document.
+       *
+       * `create` is only reached for a request `match` accepted, so the kind
+       * is settled by then; the fallback is for the impossible case.
+       */
+      const kind = classify(request, config) ?? 'html'
       // The measuring frame reports by `postMessage`, so the listener belongs to
       // the window. Taken from the document rather than `globalThis` so this is
       // driveable under a plain DOM shim in Node, where no global event target
@@ -306,7 +453,7 @@ export function createHtmlRenderer(t) {
           // while the measurement is in flight, and so a measurement that never
           // arrives leaves a sane height rather than a blank strip.
           frame.style.height = `${initial}px`
-          frame.srcdoc = buildMeasuredDocument(request.source, frameId, nonce, config.htmlAllowScripts)
+          frame.srcdoc = buildMeasuredDocument(previewSource(request.source, kind), frameId, nonce, config.htmlAllowScripts)
           view.addEventListener?.('message', onMessage)
         } else {
           // No measuring script, so no script permission is needed at all: the
@@ -315,7 +462,7 @@ export function createHtmlRenderer(t) {
           // model's own scripts.
           frame.setAttribute('sandbox', config.htmlAllowScripts ? 'allow-scripts' : '')
           frame.style.height = `${initial}px`
-          frame.srcdoc = withCharset(request.source)
+          frame.srcdoc = previewDocument(request.source, kind)
         }
 
         mount(frame)
@@ -455,8 +602,8 @@ export function createHtmlRenderer(t) {
         dialogFrame.style.height = `${Math.min(cap, estimateHeight(request.source, cap))}px`
         dialogFrame.srcdoc =
           config.previewHeightMode === 'measure'
-            ? buildMeasuredDocument(request.source, frameId, nonce, config.htmlAllowScripts)
-            : withCharset(request.source)
+            ? buildMeasuredDocument(previewSource(request.source, kind), frameId, nonce, config.htmlAllowScripts)
+            : previewDocument(request.source, kind)
 
         dialog.appendChild(bar)
         dialog.appendChild(dialogFrame)
@@ -503,7 +650,10 @@ export function createHtmlRenderer(t) {
       }
 
       return {
-        views: [{ id: 'preview', label: LANGS[request.lang] ?? 'Preview' }],
+        // The label names the kind, not the fence: a block the host could not
+        // name is still an SVG or an HTML page, and calling it "HTML" when it
+        // is a drawing would be a lie the reader can see.
+        views: [{ id: 'preview', label: LANGS[kind] ?? 'Preview' }],
 
         expand: {
           // Deliberately NO `available()`. The table implements one because a
